@@ -2,7 +2,7 @@
 
 Analyzes frontend JavaScript, TypeScript, and minified bundles statically without code execution,
 extracting API endpoints, fetch/Axios invocations, template literals, base URLs, request body
-parameters, and source location provenance.
+parameters, and Source Map v3 VLQ-remapped source locations with secret redaction.
 """
 
 import hashlib
@@ -57,6 +57,133 @@ RE_AXIOS_CONFIG_START = re.compile(
     r"\baxios\s*\(\s*\{",
     re.IGNORECASE,
 )
+
+# Secret scrubbing patterns for source snippets
+RE_SECRET_LITERAL = re.compile(
+    r"""(?i)(['"`])(?:bearer\s+[A-Za-z0-9_\-\.]+|ey[A-Za-z0-9_\-\.]+\.[A-Za-z0-9_\-\.]+|[A-Fa-f0-9]{32,64}|(?:ghp|glpat|sk|pk)_[A-Za-z0-9_]{16,}|password\s*[:=]\s*[^'"`]+|secret\s*[:=]\s*[^'"`]+)(['"`])""",
+)
+RE_EMBEDDED_URL_CREDS = re.compile(r"://[^:]+:[^@]+@")
+
+BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+BASE64_MAP = {c: i for i, c in enumerate(BASE64_CHARS)}
+
+
+def decode_vlq_values(segment_str: str) -> List[int]:
+    """Decodes a Base64 VLQ string into a list of relative integers."""
+    values = []
+    shift = 0
+    value = 0
+    for char in segment_str:
+        if char not in BASE64_MAP:
+            continue
+        integer = BASE64_MAP[char]
+        has_continuation = (integer & 32) != 0
+        digit = integer & 31
+        value += digit << shift
+        shift += 5
+        if not has_continuation:
+            is_negative = (value & 1) == 1
+            decoded = -(value >> 1) if is_negative else (value >> 1)
+            values.append(decoded)
+            value = 0
+            shift = 0
+    return values
+
+
+class SourceMapResolver:
+    """Decodes Source Map v3 VLQ mappings to accurately resolve generated coordinates to original source files."""
+
+    def __init__(self, source_map_data: Dict[str, Any]):
+        self.sources: List[str] = [str(s) for s in source_map_data.get("sources", [])]
+        self.sources_content: List[str] = [str(c) for c in source_map_data.get("sourcesContent", [])]
+        self.mappings_raw: str = str(source_map_data.get("mappings", ""))
+        self._parsed_mappings: Optional[Dict[int, List[Tuple[int, int, int, int]]]] = None
+
+    def _ensure_parsed(self):
+        if self._parsed_mappings is not None:
+            return
+        self._parsed_mappings = {}
+        if not self.mappings_raw:
+            return
+
+        lines = self.mappings_raw.split(";")
+        source_idx = 0
+        orig_line = 0
+        orig_col = 0
+
+        for gen_line_idx, line_str in enumerate(lines):
+            if not line_str:
+                continue
+            gen_col = 0
+            segments = line_str.split(",")
+            line_mappings = []
+
+            for seg in segments:
+                if not seg:
+                    continue
+                vals = decode_vlq_values(seg)
+                if len(vals) >= 1:
+                    gen_col += vals[0]
+                if len(vals) >= 4:
+                    source_idx += vals[1]
+                    orig_line += vals[2]
+                    orig_col += vals[3]
+                    line_mappings.append((gen_col, source_idx, orig_line, orig_col))
+
+            if line_mappings:
+                line_mappings.sort(key=lambda m: m[0])
+                self._parsed_mappings[gen_line_idx] = line_mappings
+
+    def resolve(self, gen_line: int, gen_col: int) -> Optional[Tuple[str, int, int]]:
+        """Resolves 1-based generated (line, col) to (original_file, original_line, original_col)."""
+        self._ensure_parsed()
+        if not self._parsed_mappings:
+            if self.sources:
+                return (self.sources[0], gen_line, gen_col)
+            return None
+
+        gen_line_0 = gen_line - 1
+        line_mappings = self._parsed_mappings.get(gen_line_0)
+        if not line_mappings:
+            if self.sources:
+                return (self.sources[0], gen_line, gen_col)
+            return None
+
+        gen_col_0 = gen_col - 1
+        best = None
+        for m in line_mappings:
+            if m[0] <= gen_col_0:
+                best = m
+            else:
+                break
+
+        if best is None:
+            best = line_mappings[0]
+
+        _, s_idx, o_line, o_col = best
+        if 0 <= s_idx < len(self.sources):
+            orig_file = self.sources[s_idx]
+            return (orig_file, o_line + 1, o_col + 1)
+        elif self.sources:
+            return (self.sources[0], o_line + 1, o_col + 1)
+        return None
+
+
+def sanitize_source_snippet(snippet: str, max_length: int = 120) -> str:
+    """Redacts embedded credentials, secret literals, and truncates snippet length."""
+    if not snippet:
+        return ""
+    cleaned = RE_EMBEDDED_URL_CREDS.sub("://[REDACTED]@", snippet)
+    cleaned = RE_SECRET_LITERAL.sub(r"\1[REDACTED_SECRET]\2", cleaned)
+    cleaned = re.sub(
+        r"(token|jwt|secret|apikey|key)=([^&\s'\"]+)",
+        r"\1=[REDACTED]",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if len(cleaned) > max_length:
+        cleaned = cleaned[: max_length - 3] + "..."
+    return cleaned
 
 
 def camel_to_snake(name: str) -> str:
@@ -181,7 +308,7 @@ class DiscoveredJsRoute:
 
 
 class BundleInspector:
-    """Static AST and lexical inspector for JavaScript/TypeScript application bundles."""
+    """Static source and lexical inspector for JavaScript/TypeScript application bundles."""
 
     def __init__(
         self,
@@ -240,7 +367,6 @@ class BundleInspector:
             raw_url_expr = match.group(1).strip()
             end_match = match.end()
 
-            # Find options object after comma if present
             options_block = ""
             comma_idx = code.find(",", end_match)
             paren_idx = code.find(")", end_match)
@@ -293,7 +419,6 @@ class BundleInspector:
             raw_url_expr = match.group(2).strip()
             end_match = match.end()
 
-            # Find data block after comma
             body_params = []
             comma_idx = code.find(",", end_match)
             paren_idx = code.find(")", end_match)
@@ -355,13 +480,13 @@ class BundleInspector:
         self,
         routes: List[DiscoveredJsRoute],
         asset_id: Optional[str] = None,
+        canonical_origin: str = "",
     ) -> List[NormalizedEndpoint]:
         """Converts discovered JS routes into canonical NormalizedEndpoint records."""
         effective_asset_id = asset_id or self.default_asset_id
         endpoints: List[NormalizedEndpoint] = []
 
         for idx, r in enumerate(routes):
-            # Compute canonical digest over code location and template
             digest_src = f"{r.method}:{r.route_template}:{r.location.file_path}:{r.location.line}"
             digest = hashlib.sha256(digest_src.encode("utf-8")).hexdigest()
 
@@ -378,6 +503,7 @@ class BundleInspector:
                     method=r.method,
                     route_template=r.route_template,
                     asset_id=effective_asset_id,
+                    canonical_origin=canonical_origin,
                     parameters=r.parameters,
                     provenance=provenance,
                     confidence=ConfidenceAssessment(
@@ -418,11 +544,9 @@ class BundleInspector:
         clean_expr = raw_url_expr.strip("'\"`")
         is_template = raw_url_expr.startswith("`") and raw_url_expr.endswith("`")
 
-        # Check if route is an API route or relative path
         if not (clean_expr.startswith("/") or clean_expr.startswith("http") or is_template):
             return None
 
-        # Resolve Base URLs if present
         base_var: Optional[str] = None
         for var_name, base_val in base_urls.items():
             if f"${{{var_name}}}" in raw_url_expr:
@@ -430,7 +554,6 @@ class BundleInspector:
                 base_var = var_name
                 signals.append(f"resolved_base_url:{var_name}")
 
-        # Parse Template Literals: replace `${paramName}` with `{snake_case_name}`
         parameters: List[ParameterCandidate] = []
         is_dynamic = False
 
@@ -440,7 +563,6 @@ class BundleInspector:
 
             def replace_slot(m: re.Match) -> str:
                 var_content = m.group(1).strip()
-                # If expression is e.g. "this.id" or "item.bookingId", extract tail identifier
                 tail_id = var_content.split(".")[-1].split("[")[0].strip()
                 param_name = camel_to_snake(tail_id)
                 sem_type = infer_semantic_type_from_name(param_name)
@@ -460,17 +582,14 @@ class BundleInspector:
         else:
             route_template = clean_expr
 
-        # Clean template: strip domain if full URL, keep path
         if route_template.startswith("http"):
             from urllib.parse import urlparse
             parsed = urlparse(route_template)
             route_template = parsed.path or "/"
 
-        # Ensure leading slash
         if not route_template.startswith("/"):
             route_template = "/" + route_template
 
-        # Add Body Parameters candidates
         for b_param in body_params:
             p_name = camel_to_snake(b_param)
             sem_type = infer_semantic_type_from_name(p_name)
@@ -491,10 +610,12 @@ class BundleInspector:
             confidence = 0.90
             signals.append("extracted_body_schema")
 
+        sanitized_raw = sanitize_source_snippet(raw_url_expr, max_length=120)
+
         return DiscoveredJsRoute(
             method=method,
             route_template=route_template,
-            raw_expression=raw_url_expr,
+            raw_expression=sanitized_raw,
             parameters=parameters,
             body_parameters=body_params,
             location=location,
@@ -529,7 +650,6 @@ class BundleInspector:
         inner = data_block[data_block.find("{") + 1: data_block.rfind("}")]
         keys: List[str] = []
 
-        # Split top-level properties by comma
         parts = []
         current = []
         depth = 0
@@ -566,7 +686,6 @@ class BundleInspector:
                 if re.match(r"^[A-Za-z0-9_]+$", key) and key not in keys:
                     keys.append(key)
             else:
-                # Shorthand: { quoteId, amount }
                 key = part.split()[0].strip().strip("'\"`")
                 if (
                     re.match(r"^[A-Za-z0-9_]+$", key)
@@ -584,7 +703,10 @@ class BundleInspector:
         file_path: str,
         source_map: Optional[Dict[str, Any]],
     ) -> SourceLocation:
-        """Computes line number, column number, and snippet from character offset."""
+        """Computes line number, column number, and snippet from character offset,
+
+        remapping via Source Map v3 VLQ decoder if available.
+        """
         line = 1 + code[:char_index].count("\n")
         line_start = code.rfind("\n", 0, char_index)
         col = (char_index - line_start) if line_start != -1 else char_index + 1
@@ -595,15 +717,21 @@ class BundleInspector:
         else:
             snippet = code[max(0, line_start + 1):line_end].strip()
 
-        effective_file = file_path
-        if source_map and isinstance(source_map.get("sources"), list):
-            sources = source_map["sources"]
-            if sources:
-                effective_file = str(sources[0])
+        orig_file = file_path
+        orig_line = line
+        orig_col = col
+
+        if source_map:
+            resolver = SourceMapResolver(source_map)
+            resolved = resolver.resolve(line, col)
+            if resolved:
+                orig_file, orig_line, orig_col = resolved
+
+        clean_snippet = sanitize_source_snippet(snippet, max_length=120)
 
         return SourceLocation(
-            file_path=effective_file,
-            line=line,
-            column=col,
-            snippet=snippet[:120],
+            file_path=orig_file,
+            line=orig_line,
+            column=orig_col,
+            snippet=clean_snippet,
         )
