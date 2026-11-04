@@ -8,9 +8,14 @@
 
 pub mod identity;
 pub mod money;
+pub mod travel;
 
 pub use identity::{TenantContext, TenantId, UserId, UserRole};
 pub use money::{CurrencyCode, Money, MoneyError, MoneyMinor};
+pub use travel::{
+    BookRequest, Booking, BookingStatus, FlightOption, Hold, HoldRequest, HoldStatus, Quote,
+    QuoteRequest, SearchRequest,
+};
 
 /// Workspace release version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
