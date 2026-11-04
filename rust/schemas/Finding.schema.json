@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Finding",
+  "description": "Structured finding representing a verified security vulnerability.",
+  "type": "object",
+  "required": [
+    "curl_poc",
+    "description",
+    "discovered_at",
+    "endpoint_pattern",
+    "evidence_ledger_hash",
+    "finding_id",
+    "invariant_id",
+    "retest_assertion",
+    "title"
+  ],
+  "properties": {
+    "curl_poc": {
+      "description": "Self-contained cURL reproduction command with sanitized parameters",
+      "type": "string"
+    },
+    "description": {
+      "description": "Detailed description of the business logic flaw",
+      "type": "string"
+    },
+    "discovered_at": {
+      "description": "Finding confirmation timestamp",
+      "type": "string",
+      "format": "date-time"
+    },
+    "endpoint_pattern": {
+      "description": "Affected endpoint route pattern",
+      "type": "string"
+    },
+    "evidence_ledger_hash": {
+      "description": "Hash of the cryptographic ledger entry recording the proof",
+      "type": "string"
+    },
+    "finding_id": {
+      "description": "Unique finding identifier",
+      "type": "string"
+    },
+    "invariant_id": {
+      "description": "Violated invariant (e.g., I-01, I-02)",
+      "allOf": [
+        {
+          "$ref": "#/definitions/InvariantId"
+        }
+      ]
+    },
+    "retest_assertion": {
+      "description": "Automated retest assertion recipe confirming invariant restoration post-fix",
+      "type": "string"
+    },
+    "title": {
+      "description": "Vulnerability title",
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "InvariantId": {
+      "description": "Canonical B2B Travel Security Invariant Identifiers.",
+      "oneOf": [
+        {
+          "description": "I-01: Multi-tenant data and state isolation (BOLA / IDOR)",
+          "type": "string",
+          "enum": [
+            "I-01"
+          ]
+        },
+        {
+          "description": "I-02: Tariff and price integrity across hold-to-confirm transitions",
+          "type": "string",
+          "enum": [
+            "I-02"
+          ]
+        },
+        {
+          "description": "I-03: Inventory hold lifecycle and cancellation concurrency",
+          "type": "string",
+          "enum": [
+            "I-03"
+          ]
+        },
+        {
+          "description": "I-04: Deprecated or shadow API boundary enforcement",
+          "type": "string",
+          "enum": [
+            "I-04"
+          ]
+        }
+      ]
+    }
+  }
+}

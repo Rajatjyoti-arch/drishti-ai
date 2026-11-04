@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExecutionResult",
+  "description": "Sanitized execution result returned by Rust to Python after network transmission.",
+  "type": "object",
+  "required": [
+    "headers",
+    "latency_ms",
+    "policy_decision_nonce",
+    "request_id",
+    "response_digest",
+    "sanitized_body",
+    "status_code"
+  ],
+  "properties": {
+    "headers": {
+      "description": "Response headers (scrubbed of sensitive internal cookies)",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "latency_ms": {
+      "description": "Round-trip execution latency in milliseconds",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "policy_decision_nonce": {
+      "description": "Cryptographic decision nonce confirming execution passed through the Policy Gate",
+      "type": "string"
+    },
+    "request_id": {
+      "description": "Matching test request ID",
+      "type": "string"
+    },
+    "response_digest": {
+      "description": "SHA-256 hash of the complete raw response frame stored in the tamper-evident ledger",
+      "type": "string"
+    },
+    "sanitized_body": {
+      "description": "Sanitized response body (with automated PII and secret redaction)",
+      "type": "string"
+    },
+    "status_code": {
+      "description": "HTTP status code returned by target",
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0.0
+    }
+  }
+}

@@ -1,0 +1,149 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Hold",
+  "description": "Inventory hold reservation record.",
+  "type": "object",
+  "required": [
+    "currency",
+    "expires_at",
+    "hold_id",
+    "locked_price",
+    "passenger_name",
+    "quote_id",
+    "status",
+    "tenant_id"
+  ],
+  "properties": {
+    "canary_token": {
+      "description": "Optional embedded canary for invariant verification",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "currency": {
+      "description": "Currency code",
+      "allOf": [
+        {
+          "$ref": "#/definitions/CurrencyCode"
+        }
+      ]
+    },
+    "expires_at": {
+      "description": "Expiration timestamp",
+      "type": "string",
+      "format": "date-time"
+    },
+    "hold_id": {
+      "description": "Unique hold identifier",
+      "type": "string"
+    },
+    "locked_price": {
+      "description": "Guaranteed locked price in minor units",
+      "type": "integer",
+      "format": "int64"
+    },
+    "passenger_name": {
+      "description": "Passenger name on reservation",
+      "type": "string"
+    },
+    "quote_id": {
+      "description": "Associated quotation ID",
+      "type": "string"
+    },
+    "status": {
+      "description": "Current hold lifecycle status",
+      "allOf": [
+        {
+          "$ref": "#/definitions/HoldStatus"
+        }
+      ]
+    },
+    "tenant_id": {
+      "description": "Owning tenant ID",
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "CurrencyCode": {
+      "description": "ISO 4217 Three-letter Currency Code.",
+      "oneOf": [
+        {
+          "description": "United States Dollar",
+          "type": "string",
+          "enum": [
+            "USD"
+          ]
+        },
+        {
+          "description": "Indian Rupee",
+          "type": "string",
+          "enum": [
+            "INR"
+          ]
+        },
+        {
+          "description": "Euro",
+          "type": "string",
+          "enum": [
+            "EUR"
+          ]
+        },
+        {
+          "description": "British Pound Sterling",
+          "type": "string",
+          "enum": [
+            "GBP"
+          ]
+        },
+        {
+          "description": "United Arab Emirates Dirham",
+          "type": "string",
+          "enum": [
+            "AED"
+          ]
+        },
+        {
+          "description": "Singapore Dollar",
+          "type": "string",
+          "enum": [
+            "SGD"
+          ]
+        }
+      ]
+    },
+    "HoldStatus": {
+      "description": "Status of an inventory reservation hold.",
+      "oneOf": [
+        {
+          "description": "Active temporary reservation",
+          "type": "string",
+          "enum": [
+            "active"
+          ]
+        },
+        {
+          "description": "Hold expired past TTL window",
+          "type": "string",
+          "enum": [
+            "expired"
+          ]
+        },
+        {
+          "description": "Successfully converted to confirmed booking",
+          "type": "string",
+          "enum": [
+            "converted"
+          ]
+        },
+        {
+          "description": "Manually released",
+          "type": "string",
+          "enum": [
+            "released"
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,183 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OutgoingTestRequest",
+  "description": "Outgoing test request submitted by the Python Intelligence Layer to the Rust Security Kernel. The Rust kernel independently validates scope, rate limits, and budgets before executing.",
+  "type": "object",
+  "required": [
+    "method",
+    "request_id",
+    "target_url",
+    "test_id"
+  ],
+  "properties": {
+    "body": {
+      "description": "Optional serialized request body",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "credential_ref": {
+      "description": "Symbolic credential alias to be resolved by the Rust Credential Broker",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "headers": {
+      "description": "Request headers (excluding raw authorization tokens)",
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "invariant_candidate": {
+      "description": "Security invariant being tested",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/InvariantId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "method": {
+      "description": "HTTP method (GET, POST, PUT, DELETE, PATCH)",
+      "type": "string"
+    },
+    "request_id": {
+      "description": "Unique identifier for this test request probe",
+      "type": "string"
+    },
+    "target_url": {
+      "description": "Destination target URL (must resolve to authorized domain allowlist)",
+      "type": "string"
+    },
+    "tenant_context": {
+      "description": "Optional tenant context (persona) simulating the request",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/TenantContext"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "test_id": {
+      "description": "Parent test suite or finding hypothesis ID",
+      "type": "string"
+    },
+    "timeout_ms": {
+      "description": "Timeout in milliseconds (capped by authoritative test budgets)",
+      "default": 5000,
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "InvariantId": {
+      "description": "Canonical B2B Travel Security Invariant Identifiers.",
+      "oneOf": [
+        {
+          "description": "I-01: Multi-tenant data and state isolation (BOLA / IDOR)",
+          "type": "string",
+          "enum": [
+            "I-01"
+          ]
+        },
+        {
+          "description": "I-02: Tariff and price integrity across hold-to-confirm transitions",
+          "type": "string",
+          "enum": [
+            "I-02"
+          ]
+        },
+        {
+          "description": "I-03: Inventory hold lifecycle and cancellation concurrency",
+          "type": "string",
+          "enum": [
+            "I-03"
+          ]
+        },
+        {
+          "description": "I-04: Deprecated or shadow API boundary enforcement",
+          "type": "string",
+          "enum": [
+            "I-04"
+          ]
+        }
+      ]
+    },
+    "TenantContext": {
+      "description": "Contextual identity of an authenticated participant in a travel transaction. Notice: Raw bearer tokens and credentials are excluded by design to prevent leaks.",
+      "type": "object",
+      "required": [
+        "role",
+        "tenant_id",
+        "user_id"
+      ],
+      "properties": {
+        "role": {
+          "description": "Role authorizing specific capabilities",
+          "allOf": [
+            {
+              "$ref": "#/definitions/UserRole"
+            }
+          ]
+        },
+        "session_id": {
+          "description": "Optional session tracking identifier",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tenant_id": {
+          "description": "Owning tenant / agency ID",
+          "type": "string"
+        },
+        "user_id": {
+          "description": "Specific user performing the action",
+          "type": "string"
+        }
+      }
+    },
+    "UserRole": {
+      "description": "B2B Travel User Role hierarchy.",
+      "oneOf": [
+        {
+          "description": "Tenant administrator with configuration access",
+          "type": "string",
+          "enum": [
+            "admin"
+          ]
+        },
+        {
+          "description": "Standard travel agent with search, quote, hold, and book rights",
+          "type": "string",
+          "enum": [
+            "agent"
+          ]
+        },
+        {
+          "description": "Sub-agent with restricted search and hold rights",
+          "type": "string",
+          "enum": [
+            "sub_agent"
+          ]
+        },
+        {
+          "description": "Read-only auditor or compliance persona",
+          "type": "string",
+          "enum": [
+            "auditor"
+          ]
+        }
+      ]
+    }
+  }
+}

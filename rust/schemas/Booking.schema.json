@@ -1,0 +1,147 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Booking",
+  "description": "Final confirmed B2B travel booking record.",
+  "type": "object",
+  "required": [
+    "booking_id",
+    "created_at",
+    "currency",
+    "debited_price",
+    "hold_id",
+    "passenger_name",
+    "quote_id",
+    "status",
+    "tenant_id"
+  ],
+  "properties": {
+    "booking_id": {
+      "description": "Global booking reservation identifier (PNR)",
+      "type": "string"
+    },
+    "canary_token": {
+      "description": "Embedded verification canary token (if injected during test)",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "created_at": {
+      "description": "Creation and ticketing timestamp",
+      "type": "string",
+      "format": "date-time"
+    },
+    "currency": {
+      "description": "Currency code",
+      "allOf": [
+        {
+          "$ref": "#/definitions/CurrencyCode"
+        }
+      ]
+    },
+    "debited_price": {
+      "description": "Final debited transaction price in minor units",
+      "type": "integer",
+      "format": "int64"
+    },
+    "hold_id": {
+      "description": "Originating hold identifier",
+      "type": "string"
+    },
+    "passenger_name": {
+      "description": "Primary passenger name",
+      "type": "string"
+    },
+    "quote_id": {
+      "description": "Associated quotation ID",
+      "type": "string"
+    },
+    "status": {
+      "description": "Current booking status",
+      "allOf": [
+        {
+          "$ref": "#/definitions/BookingStatus"
+        }
+      ]
+    },
+    "tenant_id": {
+      "description": "Tenant that legitimately created and owns this booking",
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "BookingStatus": {
+      "description": "Booking lifecycle status.",
+      "oneOf": [
+        {
+          "description": "Confirmed and ticketed",
+          "type": "string",
+          "enum": [
+            "confirmed"
+          ]
+        },
+        {
+          "description": "Ticket cancelled",
+          "type": "string",
+          "enum": [
+            "cancelled"
+          ]
+        },
+        {
+          "description": "Refunded back to agency ledger",
+          "type": "string",
+          "enum": [
+            "refunded"
+          ]
+        }
+      ]
+    },
+    "CurrencyCode": {
+      "description": "ISO 4217 Three-letter Currency Code.",
+      "oneOf": [
+        {
+          "description": "United States Dollar",
+          "type": "string",
+          "enum": [
+            "USD"
+          ]
+        },
+        {
+          "description": "Indian Rupee",
+          "type": "string",
+          "enum": [
+            "INR"
+          ]
+        },
+        {
+          "description": "Euro",
+          "type": "string",
+          "enum": [
+            "EUR"
+          ]
+        },
+        {
+          "description": "British Pound Sterling",
+          "type": "string",
+          "enum": [
+            "GBP"
+          ]
+        },
+        {
+          "description": "United Arab Emirates Dirham",
+          "type": "string",
+          "enum": [
+            "AED"
+          ]
+        },
+        {
+          "description": "Singapore Dollar",
+          "type": "string",
+          "enum": [
+            "SGD"
+          ]
+        }
+      ]
+    }
+  }
+}

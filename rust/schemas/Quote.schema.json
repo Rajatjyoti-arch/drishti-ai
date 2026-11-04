@@ -1,0 +1,113 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Quote",
+  "description": "Server-authoritative travel quotation.",
+  "type": "object",
+  "required": [
+    "base_fare",
+    "created_at",
+    "currency",
+    "expires_at",
+    "flight_id",
+    "quote_id",
+    "taxes",
+    "tenant_id",
+    "total_price"
+  ],
+  "properties": {
+    "base_fare": {
+      "description": "Base fare in minor units",
+      "type": "integer",
+      "format": "int64"
+    },
+    "created_at": {
+      "description": "Quotation timestamp",
+      "type": "string",
+      "format": "date-time"
+    },
+    "currency": {
+      "description": "Currency code",
+      "allOf": [
+        {
+          "$ref": "#/definitions/CurrencyCode"
+        }
+      ]
+    },
+    "expires_at": {
+      "description": "Quotation expiration timestamp",
+      "type": "string",
+      "format": "date-time"
+    },
+    "flight_id": {
+      "description": "Referenced flight",
+      "type": "string"
+    },
+    "quote_id": {
+      "description": "Unique quotation identifier",
+      "type": "string"
+    },
+    "taxes": {
+      "description": "Regulatory and airport taxes in minor units",
+      "type": "integer",
+      "format": "int64"
+    },
+    "tenant_id": {
+      "description": "Owning tenant ID",
+      "type": "string"
+    },
+    "total_price": {
+      "description": "Total authoritative payable amount in minor units",
+      "type": "integer",
+      "format": "int64"
+    }
+  },
+  "definitions": {
+    "CurrencyCode": {
+      "description": "ISO 4217 Three-letter Currency Code.",
+      "oneOf": [
+        {
+          "description": "United States Dollar",
+          "type": "string",
+          "enum": [
+            "USD"
+          ]
+        },
+        {
+          "description": "Indian Rupee",
+          "type": "string",
+          "enum": [
+            "INR"
+          ]
+        },
+        {
+          "description": "Euro",
+          "type": "string",
+          "enum": [
+            "EUR"
+          ]
+        },
+        {
+          "description": "British Pound Sterling",
+          "type": "string",
+          "enum": [
+            "GBP"
+          ]
+        },
+        {
+          "description": "United Arab Emirates Dirham",
+          "type": "string",
+          "enum": [
+            "AED"
+          ]
+        },
+        {
+          "description": "Singapore Dollar",
+          "type": "string",
+          "enum": [
+            "SGD"
+          ]
+        }
+      ]
+    }
+  }
+}

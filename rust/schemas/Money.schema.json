@@ -1,0 +1,74 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Money",
+  "description": "Bound monetary quantity with an explicit currency code.",
+  "type": "object",
+  "required": [
+    "amount",
+    "currency"
+  ],
+  "properties": {
+    "amount": {
+      "description": "Amount in integer minor units",
+      "type": "integer",
+      "format": "int64"
+    },
+    "currency": {
+      "description": "ISO currency code",
+      "allOf": [
+        {
+          "$ref": "#/definitions/CurrencyCode"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "CurrencyCode": {
+      "description": "ISO 4217 Three-letter Currency Code.",
+      "oneOf": [
+        {
+          "description": "United States Dollar",
+          "type": "string",
+          "enum": [
+            "USD"
+          ]
+        },
+        {
+          "description": "Indian Rupee",
+          "type": "string",
+          "enum": [
+            "INR"
+          ]
+        },
+        {
+          "description": "Euro",
+          "type": "string",
+          "enum": [
+            "EUR"
+          ]
+        },
+        {
+          "description": "British Pound Sterling",
+          "type": "string",
+          "enum": [
+            "GBP"
+          ]
+        },
+        {
+          "description": "United Arab Emirates Dirham",
+          "type": "string",
+          "enum": [
+            "AED"
+          ]
+        },
+        {
+          "description": "Singapore Dollar",
+          "type": "string",
+          "enum": [
+            "SGD"
+          ]
+        }
+      ]
+    }
+  }
+}

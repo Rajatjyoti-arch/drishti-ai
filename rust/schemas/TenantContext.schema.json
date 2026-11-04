@@ -1,0 +1,71 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TenantContext",
+  "description": "Contextual identity of an authenticated participant in a travel transaction. Notice: Raw bearer tokens and credentials are excluded by design to prevent leaks.",
+  "type": "object",
+  "required": [
+    "role",
+    "tenant_id",
+    "user_id"
+  ],
+  "properties": {
+    "role": {
+      "description": "Role authorizing specific capabilities",
+      "allOf": [
+        {
+          "$ref": "#/definitions/UserRole"
+        }
+      ]
+    },
+    "session_id": {
+      "description": "Optional session tracking identifier",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tenant_id": {
+      "description": "Owning tenant / agency ID",
+      "type": "string"
+    },
+    "user_id": {
+      "description": "Specific user performing the action",
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "UserRole": {
+      "description": "B2B Travel User Role hierarchy.",
+      "oneOf": [
+        {
+          "description": "Tenant administrator with configuration access",
+          "type": "string",
+          "enum": [
+            "admin"
+          ]
+        },
+        {
+          "description": "Standard travel agent with search, quote, hold, and book rights",
+          "type": "string",
+          "enum": [
+            "agent"
+          ]
+        },
+        {
+          "description": "Sub-agent with restricted search and hold rights",
+          "type": "string",
+          "enum": [
+            "sub_agent"
+          ]
+        },
+        {
+          "description": "Read-only auditor or compliance persona",
+          "type": "string",
+          "enum": [
+            "auditor"
+          ]
+        }
+      ]
+    }
+  }
+}
