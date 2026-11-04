@@ -10,17 +10,26 @@ use crate::gate::{GateError, PolicyGate};
 use drishti_core::policy::{ExecutionResult, OutgoingTestRequest};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Semaphore;
+use tokio::time::timeout;
 
 /// Current supported IPC protocol version.
 pub const CURRENT_IPC_VERSION: &str = "1.0";
 
 /// Maximum permitted IPC message frame size (1 Megabyte).
 pub const MAX_IPC_MESSAGE_BYTES: usize = 1024 * 1024;
+
+/// Maximum simultaneous client connections permitted on the socket.
+pub const MAX_CONCURRENT_IPC_CONNECTIONS: usize = 64;
+
+/// Maximum duration allowed for a client to transmit its request frame (5 seconds).
+pub const IPC_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Incoming IPC command payload from the Python Intelligence Layer.
 #[derive(Debug, Serialize, Deserialize)]
@@ -56,9 +65,18 @@ impl IpcServer {
 
     /// Binds the Unix domain socket and enters the asynchronous accept loop.
     pub async fn run(&self) -> Result<(), std::io::Error> {
-        // Clean up any stale socket file from prior runs
+        // Safe socket cleanup: verify existing path is indeed a socket before unlinking
         if self.socket_path.exists() {
-            let _ = fs::remove_file(&self.socket_path);
+            if let Ok(meta) = fs::symlink_metadata(&self.socket_path) {
+                if meta.file_type().is_socket() {
+                    let _ = fs::remove_file(&self.socket_path);
+                } else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        format!("Target socket path {:?} exists but is not a socket", self.socket_path),
+                    ));
+                }
+            }
         }
 
         // Ensure parent directory exists
@@ -77,11 +95,23 @@ impl IpcServer {
 
         tracing::info!("Drishti Guard IPC server listening on {:?}", self.socket_path);
 
+        let connection_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_IPC_CONNECTIONS));
+
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
+                    let sem_clone = Arc::clone(&connection_semaphore);
                     let gate_clone = Arc::clone(&self.gate);
+
                     tokio::spawn(async move {
+                        // Acquire connection permit before processing
+                        let _permit = match sem_clone.try_acquire() {
+                            Ok(p) => p,
+                            Err(_) => {
+                                tracing::warn!("IPC server saturated: maximum concurrent connections reached");
+                                return;
+                            }
+                        };
                         handle_client(stream, gate_clone).await;
                     });
                 }
@@ -95,24 +125,39 @@ impl IpcServer {
 
 async fn handle_client(mut stream: UnixStream, gate: Arc<PolicyGate>) {
     let (reader, mut writer) = stream.split();
-    let mut buf_reader = BufReader::new(reader);
+    // Wrap reader with .take() to strictly bound in-memory allocation during read
+    let bounded_reader = reader.take((MAX_IPC_MESSAGE_BYTES + 1) as u64);
+    let mut buf_reader = BufReader::new(bounded_reader);
     let mut line = String::new();
 
-    // Read a single line-delimited JSON frame with size bounds
-    match buf_reader.read_line(&mut line).await {
-        Ok(0) => return, // Connection closed
-        Ok(bytes_read) => {
-            if bytes_read > MAX_IPC_MESSAGE_BYTES {
+    // Enforce per-connection read timeout to prevent slowloris starvation
+    let read_result = timeout(IPC_READ_TIMEOUT, buf_reader.read_line(&mut line)).await;
+
+    match read_result {
+        Ok(Ok(0)) => return, // Connection closed cleanly
+        Ok(Ok(bytes_read)) => {
+            if bytes_read > MAX_IPC_MESSAGE_BYTES || line.len() > MAX_IPC_MESSAGE_BYTES {
                 let err_resp = IpcResponse::Error {
-                    message: "IPC payload exceeded maximum size limit".to_string(),
+                    message: format!(
+                        "IPC payload exceeded maximum permitted size limit ({} bytes)",
+                        MAX_IPC_MESSAGE_BYTES
+                    ),
                     error_code: "PAYLOAD_TOO_LARGE".to_string(),
                 };
                 let _ = send_response(&mut writer, &err_resp).await;
                 return;
             }
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::error!("IPC stream read error: {}", e);
+            return;
+        }
+        Err(_) => {
+            let err_resp = IpcResponse::Error {
+                message: "IPC request read timed out".to_string(),
+                error_code: "READ_TIMEOUT".to_string(),
+            };
+            let _ = send_response(&mut writer, &err_resp).await;
             return;
         }
     }
