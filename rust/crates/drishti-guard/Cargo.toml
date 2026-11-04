@@ -1,0 +1,27 @@
+[package]
+name = "drishti-guard"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native security kernel daemon and physical network execution boundary for Drishti AI"
+
+[dependencies]
+drishti-core = { path = "../drishti-core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+crossbeam-channel.workspace = true
+
+[dev-dependencies]
+tempfile = "3.12"
