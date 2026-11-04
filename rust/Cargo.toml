@@ -31,3 +31,4 @@ rusqlite = { version = "0.33", features = ["bundled"] }
 sha2 = "0.10"
 hmac = "0.12"
 crossbeam-channel = "0.5"
+url = "2.5"
