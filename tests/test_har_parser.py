@@ -1,4 +1,4 @@
-"""Unit and acceptance tests for offline HAR 1.2 parsing and security redaction."""
+"""Unit and acceptance tests for offline HAR parsing, privacy sanitization, and digest semantics."""
 
 import json
 from pathlib import Path
@@ -11,19 +11,22 @@ from drishti.discovery.har_parser import (
     HarParsingError,
     compute_canonical_har_entry_digest,
     extract_json_body_schema,
+    matches_domain,
+    sanitize_request_url,
 )
 from drishti.discovery.models import ParameterClassification
 
 
-def make_sample_har(entries: list) -> dict:
-    """Helper creating a minimal valid HAR 1.2 structure."""
-    return {
-        "log": {
-            "version": "1.2",
-            "creator": {"name": "Drishti Browser Agent", "version": "1.0"},
-            "entries": entries,
-        }
+def make_sample_har(entries: list, version: str = "1.2", creator: dict = None, browser: dict = None) -> dict:
+    """Helper creating a valid HAR structure with optional metadata."""
+    log_dict = {
+        "version": version,
+        "creator": creator or {"name": "Drishti Browser Agent", "version": "1.0"},
+        "entries": entries,
     }
+    if browser:
+        log_dict["browser"] = browser
+    return {"log": log_dict}
 
 
 def test_parse_standard_har_1_2_entries():
@@ -140,8 +143,32 @@ def test_sensitive_query_parameters_redacted_in_url():
     assert "dest=BOM" in obs.raw_url
 
 
+def test_url_userinfo_and_fragment_stripping():
+    """Acceptance Test 4: Strips URL embedded credentials (userinfo) and client-side fragments."""
+    raw_url = "https://admin:super_secret_pw@api.tbo.com:8443/api/v1/bookings/123?auth_token=jwt99#access_token=oauth_frag_token"
+    sanitized = sanitize_request_url(raw_url)
+
+    assert "admin" not in sanitized
+    assert "super_secret_pw" not in sanitized
+    assert "@" not in sanitized
+    assert "oauth_frag_token" not in sanitized
+    assert "#" not in sanitized
+    assert "auth_token=%5BREDACTED%5D" in sanitized or "auth_token=[REDACTED]" in sanitized
+    assert sanitized.startswith("https://api.tbo.com:8443/api/v1/bookings/123")
+
+    # Ingestion check
+    har_dict = make_sample_har([
+        {"request": {"method": "GET", "url": raw_url}}
+    ])
+    parser = HarParser()
+    obs = parser.parse_dict(har_dict)[0]
+    assert obs.origin == "https://api.tbo.com:8443"
+    assert "super_secret_pw" not in obs.model_dump_json()
+    assert "oauth_frag_token" not in obs.model_dump_json()
+
+
 def test_canonical_request_digest_reproducibility():
-    """Acceptance Test 4: Canonical request digest is deterministic and unaffected by header ordering."""
+    """Acceptance Test 5: Canonical request digest is deterministic and unaffected by header ordering."""
     entry_a = {
         "request": {
             "method": "GET",
@@ -170,37 +197,36 @@ def test_canonical_request_digest_reproducibility():
     obs_b = parser.parse_dict(make_sample_har([entry_b]))[0]
 
     # Because Authorization is redacted to [REDACTED] and headers are sorted canonically,
-    # both observations must produce the EXACT same canonical_digest!
+    # both observations must produce the EXACT same canonical observation_digest!
     assert obs_a.canonical_digest == obs_b.canonical_digest
+    assert obs_a.observation_digest == obs_b.observation_digest
 
 
-def test_body_schema_extraction_redacts_payload_data():
-    """Acceptance Test 5: JSON body schema extracts types and keys without leaking customer data."""
+def test_body_schema_extraction_merges_across_array_elements():
+    """Acceptance Test 6: JSON body schema merges keys across array elements without leaking customer data."""
     body_data = {
-        "credit_card": "4111222233334444",
-        "cvv": "123",
-        "amount": 2500.50,
-        "is_priority": True,
         "passengers": [
-            {"first_name": "Alice", "age": 30}
+            {"name": "Synthetic User"},
+            {"name": "Another User", "passport_number": "SYNTHETIC-123"},
         ],
+        "is_priority": True,
+        "amount": 2500.50,
     }
 
     schema = extract_json_body_schema(body_data)
-    assert schema["credit_card"] == "string"
-    assert schema["cvv"] == "string"
-    assert schema["amount"] == "number"
     assert schema["is_priority"] == "boolean"
-    assert schema["passengers"] == [{"first_name": "string", "age": "number"}]
+    assert schema["amount"] == "number"
+    # Merged array elements should discover both 'name' and 'passport_number'
+    assert schema["passengers"] == [{"name": "string", "passport_number": "string"}]
 
     # Confirm raw data is not in schema
     schema_str = json.dumps(schema)
-    assert "4111222233334444" not in schema_str
-    assert "Alice" not in schema_str
+    assert "Synthetic User" not in schema_str
+    assert "SYNTHETIC-123" not in schema_str
 
 
 def test_third_party_and_static_asset_filtering():
-    """Acceptance Test 6: Static assets (.js, .css, .png) and tracking hosts are filtered out."""
+    """Acceptance Test 7: Static assets (.js, .css, .png) and tracking hosts are filtered out."""
     har_dict = make_sample_har([
         {
             "request": {"method": "GET", "url": "https://api.tbo.com/api/v1/status"},
@@ -228,8 +254,18 @@ def test_third_party_and_static_asset_filtering():
     assert observations[0].raw_url == "https://api.tbo.com/api/v1/status"
 
 
+def test_dns_label_aware_domain_matching():
+    """Acceptance Test 8: Substring domains like not-sentry.io.travel.com are not falsely blocked."""
+    assert matches_domain("sentry.io", "sentry.io") is True
+    assert matches_domain("o123.ingest.sentry.io", "sentry.io") is True
+    assert matches_domain("not-sentry.io.travel.com", "sentry.io") is False
+    assert matches_domain("google-analytics.com", "google-analytics.com") is True
+    assert matches_domain("partner.google-analytics.com", "google-analytics.com") is True
+    assert matches_domain("fakegoogle-analytics.com", "google-analytics.com") is False
+
+
 def test_target_host_whitelist_filtering():
-    """Acceptance Test 7: Target hosts whitelist excludes out-of-scope services."""
+    """Acceptance Test 9: Target hosts whitelist excludes out-of-scope services."""
     har_dict = make_sample_har([
         {
             "request": {"method": "GET", "url": "https://api.tbo.com/api/v1/flights"},
@@ -247,7 +283,7 @@ def test_target_host_whitelist_filtering():
 
 
 def test_size_and_entry_safety_bounds():
-    """Acceptance Test 8: Rejects files or entry counts exceeding safety limits."""
+    """Acceptance Test 10: Rejects files or entry counts exceeding safety limits."""
     parser = HarParser(max_file_size_bytes=100, max_entries=2)
 
     # 1. Test entry count limit
@@ -275,8 +311,63 @@ def test_size_and_entry_safety_bounds():
         parser.parse_dict({"wrong_key": 123})
 
 
+def test_har_version_validation_and_metadata_preservation():
+    """Acceptance Test 11: Validates HAR versions and preserves creator/browser metadata."""
+    valid_har = make_sample_har(
+        entries=[{"request": {"method": "GET", "url": "https://api.tbo.com/v1/ping"}}],
+        version="1.2",
+        creator={"name": "Playwright-Drishti", "version": "1.40.0"},
+        browser={"name": "Chromium", "version": "120.0.6099.109"},
+    )
+
+    parser = HarParser()
+    observations = parser.parse_dict(valid_har)
+    assert len(observations) == 1
+    obs = observations[0]
+    assert obs.creator == {"name": "Playwright-Drishti", "version": "1.40.0"}
+    assert obs.browser == {"name": "Chromium", "version": "120.0.6099.109"}
+
+    # Unsupported version 2.0 should raise HarParsingError
+    invalid_ver_har = make_sample_har(
+        entries=[{"request": {"method": "GET", "url": "https://api.tbo.com/v1/ping"}}],
+        version="2.0",
+    )
+    with pytest.raises(HarParsingError, match="Unsupported HAR version"):
+        parser.parse_dict(invalid_ver_har)
+
+
+def test_observation_digest_vs_endpoint_signature_distinction():
+    """Acceptance Test 12: Distinguishes between request observation_digest and contract endpoint_signature."""
+    har_dict = make_sample_har([
+        {
+            "request": {"method": "GET", "url": "https://api.tbo.com/api/v1/bookings/TBOH_001?client_id=agent_a"},
+        },
+        {
+            "request": {"method": "GET", "url": "https://api.tbo.com/api/v1/bookings/TBOH_002?client_id=agent_b"},
+        },
+    ])
+
+    parser = HarParser()
+    normalizer = EndpointNormalizer()
+
+    observations = parser.parse_dict(har_dict)
+    assert len(observations) == 2
+
+    # Request representations have different URLs/query parameters, so distinct observation digests
+    assert observations[0].observation_digest != observations[1].observation_digest
+
+    endpoints = normalizer.cluster_and_normalize(observations)
+    assert len(endpoints) == 1
+    endpoint = endpoints[0]
+
+    # But both belong to the exact same contract: endpoint_signature is identical and stable
+    sig1 = endpoint.endpoint_signature
+    assert sig1 is not None and len(sig1) == 64
+    assert endpoint.route_template == "/api/v1/bookings/{booking_id}"
+
+
 def test_end_to_end_ingest_into_normalizer():
-    """Acceptance Test 9: Complete pipeline ingests HAR and outputs normalized templates."""
+    """Acceptance Test 13: Complete pipeline ingests HAR and outputs normalized templates."""
     har_dict = make_sample_har([
         {
             "request": {"method": "GET", "url": "https://api.tbo.com/api/v2/bookings/TBOH_1001"},
@@ -323,3 +414,4 @@ def test_end_to_end_ingest_into_normalizer():
     assert booking_endpoint.parameters[0].classification == ParameterClassification.CONFIRMED.value
     assert booking_endpoint.provenance[0].source == "HAR"
     assert booking_endpoint.provenance[0].canonical_digest is not None
+    assert booking_endpoint.endpoint_signature is not None
