@@ -41,6 +41,12 @@ impl From<&str> for TenantId {
     }
 }
 
+impl From<String> for TenantId {
+    fn from(s: String) -> Self {
+        Self::new(s)
+    }
+}
+
 /// Strongly typed user identifier within a tenant.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
@@ -61,6 +67,18 @@ impl UserId {
 impl fmt::Display for UserId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl From<&str> for UserId {
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<String> for UserId {
+    fn from(s: String) -> Self {
+        Self::new(s)
     }
 }
 
