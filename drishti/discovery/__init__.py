@@ -1,5 +1,10 @@
 """Drishti Discovery & Endpoint Normalization Engine."""
 
+from drishti.discovery.bundle_inspector import (
+    BundleInspector,
+    DiscoveredJsRoute,
+    SourceLocation,
+)
 from drishti.discovery.endpoint_normalizer import (
     EndpointNormalizer,
     STATIC_KEYWORDS,
@@ -30,6 +35,9 @@ __all__ = [
     "compute_canonical_har_entry_digest",
     "extract_json_body_schema",
     "STATIC_KEYWORDS",
+    "BundleInspector",
+    "DiscoveredJsRoute",
+    "SourceLocation",
     "ParameterCandidate",
     "ParameterLocation",
     "ParameterClassification",
