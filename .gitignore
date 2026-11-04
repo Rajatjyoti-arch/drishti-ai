@@ -63,3 +63,8 @@ cover/
 6adb42d2626d7_problem_statement/
 all_ps_text.txt
 __MACOSX/
+
+# Rust build artifacts
+target/
+rust/target/
+**/*.rs.bk
