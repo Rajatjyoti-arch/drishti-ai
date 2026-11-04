@@ -183,6 +183,10 @@ class EndpointNormalizer:
             roles_observed=roles,
         )
 
+    def normalize(self, observations: List[EndpointObservation]) -> List[NormalizedEndpoint]:
+        """Normalizes a collection of observations into clustered, canonical NormalizedEndpoints."""
+        return self.cluster_and_normalize(observations)
+
     def cluster_and_normalize(
         self, observations: List[EndpointObservation]
     ) -> List[NormalizedEndpoint]:
