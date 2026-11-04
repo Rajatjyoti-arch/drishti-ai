@@ -8,10 +8,10 @@ from drishti.core.config import EvidenceConfig
 from drishti.audit.hash_chain import sha256_digest, canonical_json
 
 REDACTION_PATTERNS = [
-    (re.compile(r'(?i)(authorization:\s*bearer\s+)([A-Za-z0-9\-_\.]+)', re.IGNORECASE), r'\1[REDACTED_TOKEN]'),
-    (re.compile(r'(?i)(cookie:\s*.*?(?:session|token|jwt)=)([^\s;]+)', re.IGNORECASE), r'\1[REDACTED_COOKIE]'),
-    (re.compile(r'(?i)("password"\s*:\s*")([^"]+)(")', re.IGNORECASE), r'\1[REDACTED_PASSWORD]\3'),
-    (re.compile(r'(?i)("card_number"|"cvv"|"credit_card")\s*:\s*("[^"]+"|\d+)', re.IGNORECASE), r'"\1":"[REDACTED_PAYMENT]"'),
+    (re.compile(r'(?i)(["\']?authorization["\']?\s*:\s*["\']?bearer\s+)([A-Za-z0-9\-_\.]+)', re.IGNORECASE), r'\1[REDACTED_TOKEN]'),
+    (re.compile(r'(?i)(["\']?cookie["\']?\s*:\s*["\']?.*?(?:session_id|session|token|jwt|auth)=)([^\s;"]+)', re.IGNORECASE), r'\1[REDACTED_COOKIE]'),
+    (re.compile(r'(?i)(["\']password["\']\s*:\s*["\'])([^"\']+)(["\'])', re.IGNORECASE), r'\1[REDACTED_PASSWORD]\3'),
+    (re.compile(r'(?i)(["\'](?:card_number|cvv|credit_card)["\']\s*:\s*["\']?)([^"\'}\s,]+)(["\']?)', re.IGNORECASE), r'\1[REDACTED_PAYMENT]\3'),
     (re.compile(r'\b(?:\d{4}[-\s]?){3}\d{4}\b'), '[REDACTED_CREDIT_CARD]'),
     (re.compile(r'\b[A-PR-WYa-pr-wy][1-9]\d\s?\d{4}[1-9]\b'), '[REDACTED_PASSPORT]')
 ]
