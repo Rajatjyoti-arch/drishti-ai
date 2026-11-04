@@ -1,0 +1,23 @@
+# Drishti AI - Authoritative Execution & Safety Budgets
+version: "1.0.0"
+
+rate_limit:
+  requests_per_second: 2.0
+  burst_capacity: 4
+  max_concurrency: 2
+
+execution:
+  timeout_seconds: 15.0
+  max_requests_per_test: 20
+  max_total_requests_per_run: 250
+  max_retries_per_request: 2
+
+circuit_breaker:
+  enabled: true
+  latency_spike_threshold_ms: 500
+  consecutive_5xx_threshold: 3
+
+evidence:
+  max_payload_size_bytes: 1048576 # 1 MB
+  redaction_enabled: true
+  retention_days: 30
