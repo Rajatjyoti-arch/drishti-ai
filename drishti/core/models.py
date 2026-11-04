@@ -103,3 +103,12 @@ class VerifiedFinding(BaseModel):
     raw_response_diff: str
     suggested_fix: str
     verified_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+class ExecutionResult(BaseModel):
+    request_id: str
+    status_code: int
+    headers: Dict[str, str] = Field(default_factory=dict)
+    sanitized_body: str = ""
+    latency_ms: int = 0
+    policy_decision_nonce: str = ""
+    response_digest: str = ""
