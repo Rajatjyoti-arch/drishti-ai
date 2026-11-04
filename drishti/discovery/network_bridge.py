@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 from drishti.audit.hash_chain import sha256_digest
 from drishti.audit.ledger import TamperEvidentLedger
 from drishti.core.exceptions import OutOfScopeError, PolicyViolationError
-from drishti.core.models import ExecutionResult, OutgoingTestRequest, TenantContext
+from drishti.core.models import ExecutionResult, InvariantType, OutgoingTestRequest
 from drishti.discovery.crawler_models import BrowserObservation, RoleContext
 from drishti.ipc.client import GuardIpcError, RustGuardClient
 from drishti.policy.scope_validator import ScopeValidator
@@ -118,16 +118,12 @@ class NetworkBridge:
             req_headers[k] = v
 
         outgoing_req = OutgoingTestRequest(
-            tenant=TenantContext(
-                tenant_id=role_context.tenant_id,
-                agency_id=role_context.agency_id,
-                role=role_context.role_name,
-            ),
-            target_url=raw_url,
+            target_tenant_id=role_context.tenant_id,
+            url=raw_url,
             method=method,
             headers=req_headers,
             body=post_data,
-            target_invariant="I-01",
+            target_invariant=InvariantType.TENANT_ISOLATION,
         )
 
         # 3. Execute via Rust Guard or executor (Fail-Closed)
