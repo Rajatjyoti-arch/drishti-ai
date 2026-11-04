@@ -11,7 +11,7 @@
 [![Framework](https://img.shields.io/badge/Rust%20API-Axum-7C3AED)](https://github.com/tokio-rs/axum)
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Track](https://img.shields.io/badge/VOYAGEHACK%204.0-Fraud%20Prevention%20%26%20Security-ef8c35)](https://unstop.com/)
-[![Tests](https://img.shields.io/badge/Reported%20tests-113%20passing-2ea44f)](#verification-status)
+[![Tests](https://img.shields.io/badge/Reported%20tests-142%20passing-2ea44f)](#verification-status)
 
 *An application is more than a collection of endpoints. It is a network of identities, bookings, suppliers, payments, and state transitions. Drishti AI tests the rules that hold that network together.*
 
@@ -279,8 +279,8 @@ Latest reported automated test results:
 | Suite | Reported result |
 |---|---:|
 | Rust workspace | 40 passed |
-| Python suite | 73 passed |
-| **Combined** | **113 passed** |
+| Python suite | 102 passed |
+| **Combined** | **142 passed** |
 
 Run the commands above to reproduce the results in your own checkout. Test counts are a snapshot of the reported milestone and may change as the suite grows.
 
@@ -290,8 +290,8 @@ Run the commands above to reproduce the results in your own checkout. Test count
 - [x] **Synthetic target:** B2B travel simulator with vulnerable and patched I-01 / I-02 modes.
 - [x] **Rust foundation:** `drishti-core`, Axum mock target, and standalone `drishti-guard` daemon.
 - [x] **Offline discovery:** HAR ingestion, endpoint normalization, and static frontend bundle inspection.
-- [ ] **Change intelligence:** versioned inventory and schema reconciliation; identify security-relevant changes.
-- [ ] **Role-aware crawling:** Playwright discovery with guard-mediated network access.
+- [x] **Change intelligence:** versioned inventory and schema reconciliation; identify security-relevant changes.
+- [x] **Role-aware crawling:** Playwright discovery with guard-mediated network access.
 - [ ] **Travel Security Intelligence Graph:** model tenants, identities, endpoints, objects, journeys, and invariants.
 - [ ] **Specialist testing:** complete I-01 and I-02 test adapters against the authorized staging target.
 - [ ] **Finding lifecycle:** independent black-box verification, actionable reports, and post-fix retesting.
