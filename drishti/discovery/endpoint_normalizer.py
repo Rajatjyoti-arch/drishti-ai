@@ -175,6 +175,7 @@ class EndpointNormalizer:
             method=observation.method,
             route_template=route_template,
             asset_id=observation.asset_id or "primary-api",
+            canonical_origin=observation.get_origin(),
             parameters=path_params,
             query_parameters=query_params,
             provenance=provenance,
@@ -449,11 +450,13 @@ class EndpointNormalizer:
 
         final_score = min(score, 1.0)
         effective_asset_id = entries[0][0].asset_id if entries and entries[0][0].asset_id else "primary-api"
+        effective_origin = entries[0][0].get_origin() if entries else ""
 
         return NormalizedEndpoint(
             method=method,
             route_template=route_template,
             asset_id=effective_asset_id,
+            canonical_origin=effective_origin,
             parameters=path_params,
             query_parameters=list(all_query_params.values()),
             provenance=all_provenance,
