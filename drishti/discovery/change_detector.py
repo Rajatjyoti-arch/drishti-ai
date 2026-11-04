@@ -98,7 +98,7 @@ class ChangeDetector:
         asset_id: Optional[str] = None,
         deployment_id: Optional[str] = None,
         source_types: Optional[List[str]] = None,
-        capture_completeness: str = CaptureCompleteness.COMPLETE.value,
+        capture_completeness: str = CaptureCompleteness.PARTIAL.value,
     ) -> InventorySnapshot:
         """Constructs an InventorySnapshot from normalized endpoints, calculating deterministic digest."""
         effective_asset_id = asset_id or self.default_asset_id
@@ -242,32 +242,65 @@ class ChangeDetector:
             prev_ep = prev_endpoints[key]
             curr_ep = curr_endpoints[key]
 
-            # Compare endpoint signatures for contract shifts
-            if prev_ep.endpoint_signature == curr_ep.endpoint_signature:
-                # Check for role observation expansion even if signature is identical
-                prev_roles = set(prev_ep.roles_observed)
-                curr_roles = set(curr_ep.roles_observed)
-                new_roles = curr_roles - prev_roles
-                if new_roles:
-                    rec_invs = ["I-01", "I-06"]
+            # 4a. Role observation comparison: evaluated independently of signature comparison
+            prev_roles = set(prev_ep.roles_observed)
+            curr_roles = set(curr_ep.roles_observed)
+            new_roles = curr_roles - prev_roles
+            if new_roles:
+                rec_invs = ["I-01", "I-06"]
+                aggregated_invariants.update(rec_invs)
+                changes.append(
+                    EndpointChange(
+                        change_id=f"DELTA-{uuid.uuid4().hex[:6].upper()}",
+                        endpoint_identity=curr_ep.endpoint_identity,
+                        change_type=ChangeType.ROLE_OBSERVATION_CHANGED.value,
+                        previous_fingerprint=",".join(sorted(prev_roles)),
+                        current_fingerprint=",".join(sorted(curr_roles)),
+                        affected_parameters=[],
+                        provenance=curr_ep.provenance,
+                        confidence=0.95,
+                        recommended_invariants=rec_invs,
+                        details={
+                            "previous_roles": sorted(list(prev_roles)),
+                            "newly_observed_roles": sorted(list(new_roles)),
+                        },
+                    )
+                )
+
+            # 4b. Parameter semantic type change detection (e.g. generic id -> BOOKING_ID)
+            prev_param_types = {p.name: p.semantic_type for p in prev_ep.parameters + prev_ep.query_parameters}
+            curr_param_types = {p.name: p.semantic_type for p in curr_ep.parameters + curr_ep.query_parameters}
+            for p_name, curr_sem in curr_param_types.items():
+                prev_sem = prev_param_types.get(p_name)
+                if prev_sem and prev_sem != curr_sem:
+                    invs: Set[str] = set()
+                    if is_object_id_related(p_name, curr_sem):
+                        invs.add("I-01")
+                    if is_pricing_related(p_name, curr_sem):
+                        invs.add("I-02")
+                    rec_invs = sorted(list(invs))
                     aggregated_invariants.update(rec_invs)
                     changes.append(
                         EndpointChange(
                             change_id=f"DELTA-{uuid.uuid4().hex[:6].upper()}",
                             endpoint_identity=curr_ep.endpoint_identity,
-                            change_type=ChangeType.ROLE_OBSERVATION_CHANGED.value,
-                            previous_fingerprint=prev_ep.endpoint_signature,
-                            current_fingerprint=curr_ep.endpoint_signature,
-                            affected_parameters=[],
+                            change_type=ChangeType.PARAMETER_SEMANTICS_CHANGED.value,
+                            previous_fingerprint=prev_sem,
+                            current_fingerprint=curr_sem,
+                            affected_parameters=[p_name],
                             provenance=curr_ep.provenance,
-                            confidence=0.95,
+                            confidence=0.92,
                             recommended_invariants=rec_invs,
                             details={
-                                "previous_roles": sorted(list(prev_roles)),
-                                "newly_observed_roles": sorted(list(new_roles)),
+                                "parameter": p_name,
+                                "previous_semantic_type": prev_sem,
+                                "current_semantic_type": curr_sem,
                             },
                         )
                     )
+
+            # If contract signature has not shifted, skip parameter/schema structural diffing
+            if prev_ep.endpoint_signature == curr_ep.endpoint_signature:
                 continue
 
             # Signatures differ -> identify granular parameter or schema modifications
@@ -366,39 +399,49 @@ class ChangeDetector:
                     )
                 )
 
-        # 5. Method Changed Check (e.g. GET became POST on same route and origin)
-        # Search for route_template matches where method differs
-        prev_route_map = {
-            (ep.asset_id, ep.canonical_origin, ep.route_template): ep
-            for ep in prev_endpoints.values()
-        }
-        curr_route_map = {
-            (ep.asset_id, ep.canonical_origin, ep.route_template): ep
-            for ep in curr_endpoints.values()
-        }
+        # 5. Method Changed Check across method sets per route template (prevents dictionary overwriting)
+        from collections import defaultdict
+        prev_route_methods: Dict[Tuple[str, str, str], Dict[str, NormalizedEndpoint]] = defaultdict(dict)
+        for ep in prev_endpoints.values():
+            prev_route_methods[(ep.asset_id, ep.canonical_origin, ep.route_template)][ep.method.upper()] = ep
 
-        for (asset, origin, route_tmpl), curr_ep in curr_route_map.items():
-            prev_ep = prev_route_map.get((asset, origin, route_tmpl))
-            if prev_ep and prev_ep.method != curr_ep.method:
-                rec_invs = ["I-01"]
-                aggregated_invariants.update(rec_invs)
-                changes.append(
-                    EndpointChange(
-                        change_id=f"DELTA-{uuid.uuid4().hex[:6].upper()}",
-                        endpoint_identity=curr_ep.endpoint_identity,
-                        change_type=ChangeType.METHOD_CHANGED.value,
-                        previous_fingerprint=prev_ep.method,
-                        current_fingerprint=curr_ep.method,
-                        affected_parameters=[],
-                        provenance=curr_ep.provenance,
-                        confidence=0.95,
-                        recommended_invariants=rec_invs,
-                        details={
-                            "previous_method": prev_ep.method,
-                            "new_method": curr_ep.method,
-                        },
+        curr_route_methods: Dict[Tuple[str, str, str], Dict[str, NormalizedEndpoint]] = defaultdict(dict)
+        for ep in curr_endpoints.values():
+            curr_route_methods[(ep.asset_id, ep.canonical_origin, ep.route_template)][ep.method.upper()] = ep
+
+        all_route_keys = set(prev_route_methods.keys()) & set(curr_route_methods.keys())
+        for r_key in sorted(all_route_keys):
+            prev_m_dict = prev_route_methods[r_key]
+            curr_m_dict = curr_route_methods[r_key]
+
+            prev_methods = set(prev_m_dict.keys())
+            curr_methods = set(curr_m_dict.keys())
+
+            if prev_methods != curr_methods:
+                added_methods = curr_methods - prev_methods
+                for m in sorted(added_methods):
+                    curr_ep = curr_m_dict[m]
+                    rec_invs = ["I-01"]
+                    aggregated_invariants.update(rec_invs)
+                    changes.append(
+                        EndpointChange(
+                            change_id=f"DELTA-{uuid.uuid4().hex[:6].upper()}",
+                            endpoint_identity=curr_ep.endpoint_identity,
+                            change_type=ChangeType.METHOD_CHANGED.value,
+                            previous_fingerprint=",".join(sorted(prev_methods)),
+                            current_fingerprint=",".join(sorted(curr_methods)),
+                            affected_parameters=[],
+                            provenance=curr_ep.provenance,
+                            confidence=0.95,
+                            recommended_invariants=rec_invs,
+                            details={
+                                "route_template": r_key[2],
+                                "previous_methods": sorted(list(prev_methods)),
+                                "current_methods": sorted(list(curr_methods)),
+                                "added_method": m,
+                            },
+                        )
                     )
-                )
 
         return AttackSurfaceChangeSet(
             changeset_id=changeset_id,
