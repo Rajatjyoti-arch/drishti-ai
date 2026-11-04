@@ -246,3 +246,32 @@ def test_data_minimization_caps_observed_values_sample():
     assert len(endpoint.parameters[0].observed_values) == 3
     # Provenance still tracks all 10 observations
     assert len(endpoint.provenance) == 10
+
+
+def test_persistent_identifier_masking_prevents_raw_booking_retention():
+    """Acceptance Test 12: When mask_observed_identifiers=True, raw booking IDs are masked."""
+    normalizer = EndpointNormalizer(mask_observed_identifiers=True)
+    observations = [
+        EndpointObservation(
+            method="GET",
+            raw_url="https://api.tbo.com/api/v1/bookings/TBOH_998877",
+            observation_id="OBS-01",
+        ),
+        EndpointObservation(
+            method="GET",
+            raw_url="https://api.tbo.com/api/v1/bookings/TBOH_112233",
+            observation_id="OBS-02",
+        ),
+    ]
+
+    results = normalizer.cluster_and_normalize(observations)
+    assert len(results) == 1
+    endpoint = results[0]
+
+    param = endpoint.parameters[0]
+    assert param.is_masked is True
+    # Raw values are masked
+    assert "TBOH_998877" not in param.observed_values
+    assert "TBOH_112233" not in param.observed_values
+    assert all(v == "TBOH_***" for v in param.observed_values)
+
