@@ -273,3 +273,18 @@ def test_cross_discovery_reconciliation():
     # Route template and fully namespaced endpoint_identity match perfectly!
     assert js_endpoint.route_template == har_endpoint.route_template
     assert js_endpoint.endpoint_identity == har_endpoint.endpoint_identity
+
+
+def test_source_map_unmapped_returns_none_instead_of_arbitrary_source():
+    """Acceptance Test 13: Unmapped generated position returns None rather than arbitrarily attributing to sources[0]."""
+    raw_map = {
+        "version": 3,
+        "sources": ["src/alpha.ts", "src/beta.ts"],
+        "names": [],
+        "mappings": "",  # Empty mappings -> nothing can map
+    }
+    resolver = SourceMapResolver(raw_map)
+    # Generated line 1, column 5 has no mapping
+    result = resolver.resolve(1, 5)
+    # Must return None (unmapped), NOT fallback to sources[0]!
+    assert result is None
