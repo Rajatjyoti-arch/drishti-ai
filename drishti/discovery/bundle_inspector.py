@@ -135,18 +135,16 @@ class SourceMapResolver:
                 self._parsed_mappings[gen_line_idx] = line_mappings
 
     def resolve(self, gen_line: int, gen_col: int) -> Optional[Tuple[str, int, int]]:
-        """Resolves 1-based generated (line, col) to (original_file, original_line, original_col)."""
+        """Resolves 1-based generated (line, col) to (original_file, original_line, original_col).
+        Returns None if no mapping exists for the generated position.
+        """
         self._ensure_parsed()
         if not self._parsed_mappings:
-            if self.sources:
-                return (self.sources[0], gen_line, gen_col)
             return None
 
         gen_line_0 = gen_line - 1
         line_mappings = self._parsed_mappings.get(gen_line_0)
         if not line_mappings:
-            if self.sources:
-                return (self.sources[0], gen_line, gen_col)
             return None
 
         gen_col_0 = gen_col - 1
@@ -158,14 +156,12 @@ class SourceMapResolver:
                 break
 
         if best is None:
-            best = line_mappings[0]
+            return None
 
         _, s_idx, o_line, o_col = best
         if 0 <= s_idx < len(self.sources):
             orig_file = self.sources[s_idx]
             return (orig_file, o_line + 1, o_col + 1)
-        elif self.sources:
-            return (self.sources[0], o_line + 1, o_col + 1)
         return None
 
 
