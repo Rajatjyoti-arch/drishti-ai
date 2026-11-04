@@ -1,0 +1,19 @@
+[package]
+name = "drishti-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Canonical domain models, schemas, and contract primitives for Drishti AI"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
