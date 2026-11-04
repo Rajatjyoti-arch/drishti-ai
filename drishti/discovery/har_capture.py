@@ -141,12 +141,8 @@ class HarCaptureExporter:
             endpoint_obs = EndpointObservation(
                 method=obs.method,
                 raw_url=obs.url,
-                status_code=obs.status_code,
-                request_headers=obs.request_headers,
-                request_body=parsed_body,
-                response_headers=obs.response_headers,
-                response_body=obs.response_body,
-                roles_observed=[obs.role_name],
+                response_status=obs.status_code,
+                role=obs.role_name,
                 asset_id=default_asset_id,
             )
             results.append(endpoint_obs)
