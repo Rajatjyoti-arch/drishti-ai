@@ -151,7 +151,8 @@ drishti-ai/
 │   │   ├── models.py                   # NormalizedEndpoint, ParameterCandidate, EndpointObservation
 │   │   ├── endpoint_normalizer.py      # Deterministic clustering, static keyword preservation, UUIDv4 detection
 │   │   ├── har_parser.py               # Offline HAR 1.2 ingestion, canonical request digest, security redaction
-│   │   └── bundle_inspector.py         # Static JS/TS AST bundle inspector for fetch, axios, and template literals
+│   │   ├── bundle_inspector.py         # Static JS/TS bundle inspector for fetch, axios, and template literals
+│   │   └── change_detector.py          # Versioned inventory snapshot reconciliation & invariant recommendation
 │   └── ipc/                            # Process-Isolated Unix Domain Socket Client Bridge
 │       └── client.py                   # RustGuardClient forwarding requests over /run/drishti/guard.sock
 ├── tests/
@@ -172,7 +173,8 @@ drishti-ai/
 │   ├── test_rust_ipc_integration.py    # 3 tests: Python UDS client protocol, versioning, error propagation
 │   ├── test_endpoint_normalizer.py     # 12 tests: static keyword preservation, UUIDv4, wildcard redaction
 │   ├── test_har_parser.py              # 13 tests: offline HAR ingestion, userinfo/fragment stripping, array merging
-│   └── test_bundle_inspector.py        # 11 tests: static JS bundle inspection, axios/fetch calls, template literals
+│   ├── test_bundle_inspector.py        # 12 tests: static JS bundle inspection, VLQ source maps, secret scrubbing
+│   └── test_change_detector.py         # 14 tests: versioned snapshots, absence vs removal, invariant mapping
 └── rust/                               # Rust Security Kernel & High-Performance Services
     ├── Cargo.toml                      # Cargo workspace root
     ├── schemas/                        # 9 Canonical JSON Schemas generated from Rust types
@@ -221,8 +223,8 @@ python3 -m drishti.main verify-contract --contract-path configs/auth_contract.js
 * [x] **Rust Phase 1: Shared Domain Contracts (`drishti-core`):** Strong typing, Serde models, Schemars JSON Schema generation, and golden serialization compatibility tests. *(16 passing tests).*
 * [x] **Rust Phase 2: High-Performance Travel Simulator (`mock-travel-api`):** Axum target running both vulnerable and patched services on identical domain models. *(3 differential tests).*
 * [x] **Rust Phase 3: Native Security Kernel (`drishti-guard`):** Rusqlite single-writer ledger, SHA-256 hash chaining, token-bucket limiter, Reqwest transport, Unix socket IPC. *(21 passing tests).*
-* [x] **Stage 3: Discovery & Normalization (Part 1 - Offline & Static Recon):** Deterministic endpoint normalization, static alternative branch preservation, UUIDv4 detection, offline bounded HAR parser with URL userinfo/fragment stripping and array schema merging, and static JS/TS bundle inspector for fetch, axios, and template literals. *(36 passing tests across normalizer, HAR parser, and bundle inspector).*
-* [ ] **Stage 3: Discovery & Normalization (Part 2 - Change Detection & Browser Crawl):** Change detection reconciliation and Playwright authenticated crawler.
+* [x] **Stage 3: Discovery & Attack Surface Change Intelligence:** Deterministic endpoint normalization with service namespacing, offline bounded HAR parser, static JS/TS bundle inspector with Source Map v3 VLQ remapping, and versioned inventory ChangeDetector with automated invariant recommendations (I-01/I-02) and absence vs removal classification. *(51 passing tests across normalizer, HAR parser, bundle inspector, and change detector).*
+* [ ] **Stage 3: Browser Crawl Engine:** Role-aware Playwright authenticated crawler mediated through Rust Guard.
 * [ ] **Stage 4: Travel Intelligence Graph:** NetworkX model of `Search ➔ Quote ➔ Hold ➔ Book` and multi-tenant invariant bindings.
 * [ ] **Stage 5: Specialist Executors:** Implement `BOLAExecutor` (I-01) and `PricingExecutor` (I-02) dispatching through the Policy Gate.
 * [ ] **Stage 6: Black-Box Independent Verifier:** Canary data detection, ownership validation, and invariant oracles.
