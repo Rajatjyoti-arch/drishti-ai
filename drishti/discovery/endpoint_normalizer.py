@@ -86,13 +86,33 @@ def is_recognized_dynamic_pattern(seg: str) -> bool:
     return False
 
 
+def mask_observed_identifier(val: str, sem_type: SemanticType) -> str:
+    """Masks dynamic identifiers to prevent persistent storage of raw booking references or PII."""
+    if sem_type == SemanticType.BOOKING_ID:
+        prefix = val[:4] if len(val) >= 4 else "BOK"
+        return f"{prefix}_***"
+    elif sem_type == SemanticType.UUID:
+        return "[UUID_MASKED]"
+    elif sem_type == SemanticType.NUMERIC_ID:
+        return "[ID_MASKED]"
+    elif sem_type in (SemanticType.HOLD_ID, SemanticType.QUOTE_ID, SemanticType.FLIGHT_ID, SemanticType.TENANT_ID):
+        prefix = val.split("_")[0] if "_" in val else val[:3]
+        return f"{prefix}_***"
+    return "[VALUE_MASKED]"
+
+
 class EndpointNormalizer:
     """Deterministic Normalizer mapping dynamic paths to canonical route templates."""
 
-    def __init__(self, static_keywords: Optional[Set[str]] = None):
+    def __init__(
+        self,
+        static_keywords: Optional[Set[str]] = None,
+        mask_observed_identifiers: bool = False,
+    ):
         self.static_keywords = set(STATIC_KEYWORDS)
         if static_keywords:
             self.static_keywords.update(k.lower() for k in static_keywords)
+        self.mask_observed_identifiers = mask_observed_identifiers
 
     def normalize_single(self, observation: EndpointObservation) -> NormalizedEndpoint:
         """Normalizes a single observed URL without multi-observation clustering."""
@@ -113,13 +133,19 @@ class EndpointNormalizer:
 
             if is_param:
                 normalized_segments.append(f"{{{param_name}}}")
+                stored_vals = (
+                    [mask_observed_identifier(seg, sem_type)]
+                    if self.mask_observed_identifiers
+                    else [seg]
+                )
                 path_params.append(
                     ParameterCandidate(
                         name=param_name,
                         location=ParameterLocation.PATH.value,
                         semantic_type=sem_type.value,
                         classification=classification,
-                        observed_values=[seg],
+                        observed_values=stored_vals,
+                        is_masked=self.mask_observed_identifiers,
                     )
                 )
                 confidence_base += score_boost
@@ -148,6 +174,7 @@ class EndpointNormalizer:
         return NormalizedEndpoint(
             method=observation.method,
             route_template=route_template,
+            asset_id=observation.asset_id or "primary-api",
             parameters=path_params,
             query_parameters=query_params,
             provenance=provenance,
@@ -365,6 +392,11 @@ class EndpointNormalizer:
 
                 # Data minimization: sample at most MAX_OBSERVED_VALUES_SAMPLE values
                 sampled_values = sorted(list(distinct_values))[:MAX_OBSERVED_VALUES_SAMPLE]
+                stored_values = (
+                    [mask_observed_identifier(v, sem_type) for v in sampled_values]
+                    if self.mask_observed_identifiers
+                    else sampled_values
+                )
 
                 path_params.append(
                     ParameterCandidate(
@@ -372,7 +404,8 @@ class EndpointNormalizer:
                         location=ParameterLocation.PATH.value,
                         semantic_type=sem_type.value,
                         classification=classification,
-                        observed_values=sampled_values,
+                        observed_values=stored_values,
+                        is_masked=self.mask_observed_identifiers,
                     )
                 )
                 signals.add("repeated_path_position")
@@ -383,13 +416,19 @@ class EndpointNormalizer:
             is_param, param_name, sem_type, _, sig, classification = self._classify_segment(sample_val, prev_seg)
             if is_param:
                 normalized_segments.append(f"{{{param_name}}}")
+                stored_single = (
+                    [mask_observed_identifier(sample_val, sem_type)]
+                    if self.mask_observed_identifiers
+                    else [sample_val]
+                )
                 path_params.append(
                     ParameterCandidate(
                         name=param_name,
                         location=ParameterLocation.PATH.value,
                         semantic_type=sem_type.value,
                         classification=classification,
-                        observed_values=[sample_val],
+                        observed_values=stored_single,
+                        is_masked=self.mask_observed_identifiers,
                     )
                 )
                 signals.add(sig)
@@ -409,10 +448,12 @@ class EndpointNormalizer:
             signals.add("static_route_match")
 
         final_score = min(score, 1.0)
+        effective_asset_id = entries[0][0].asset_id if entries and entries[0][0].asset_id else "primary-api"
 
         return NormalizedEndpoint(
             method=method,
             route_template=route_template,
+            asset_id=effective_asset_id,
             parameters=path_params,
             query_parameters=list(all_query_params.values()),
             provenance=all_provenance,
