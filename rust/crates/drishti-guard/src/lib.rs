@@ -6,6 +6,7 @@
 #![deny(unsafe_code)]
 
 pub mod credential_broker;
+pub mod gate;
 pub mod hash_chain;
 pub mod ledger;
 pub mod rate_limiter;
@@ -13,6 +14,7 @@ pub mod scope_validator;
 pub mod transport;
 
 pub use credential_broker::{CredentialBroker, CredentialError, ScopedSecret};
+pub use gate::{GateError, PolicyGate};
 pub use hash_chain::{canonical_serialize, LedgerEvent, GENESIS_HASH};
 pub use ledger::{AuditLedger, CheckpointRecord, LedgerError};
 pub use rate_limiter::{ConcurrencyPermit, MultiBudgetRateLimiter, RateLimitError, RateLimiterConfig};
