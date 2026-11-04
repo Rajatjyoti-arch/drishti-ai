@@ -5,5 +5,9 @@
 
 #![deny(unsafe_code)]
 
+pub mod hash_chain;
+
+pub use hash_chain::{canonical_serialize, LedgerEvent, GENESIS_HASH};
+
 /// Release version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
