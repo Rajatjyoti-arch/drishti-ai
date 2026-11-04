@@ -20,6 +20,19 @@ from drishti.discovery.har_parser import (
     compute_canonical_har_entry_digest,
     extract_json_body_schema,
 )
+from drishti.discovery.browser_context import BrowserContextManager
+from drishti.discovery.crawler import JourneyCrawler
+from drishti.discovery.crawler_models import (
+    ActionType,
+    BrowserObservation,
+    CrawlSession,
+    CrawlStatus,
+    JourneyPlan,
+    JourneyStep,
+    RoleContext,
+)
+from drishti.discovery.har_capture import HarCaptureExporter
+from drishti.discovery.network_bridge import NetworkBridge
 from drishti.discovery.models import (
     AttackSurfaceChangeSet,
     CaptureCompleteness,
@@ -62,4 +75,15 @@ __all__ = [
     "SemanticType",
     "ProvenanceSource",
     "ConfidenceAssessment",
+    "RoleContext",
+    "CrawlSession",
+    "CrawlStatus",
+    "JourneyStep",
+    "JourneyPlan",
+    "BrowserObservation",
+    "ActionType",
+    "NetworkBridge",
+    "BrowserContextManager",
+    "HarCaptureExporter",
+    "JourneyCrawler",
 ]
