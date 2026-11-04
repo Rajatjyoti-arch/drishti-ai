@@ -158,6 +158,7 @@ class ChangeType(str, Enum):
     ROLE_OBSERVATION_CHANGED = "ROLE_OBSERVATION_CHANGED"
     BUNDLE_ROUTE_CHANGED = "BUNDLE_ROUTE_CHANGED"
     AUTHENTICATION_OBSERVATION_CHANGED = "AUTHENTICATION_OBSERVATION_CHANGED"
+    PARAMETER_SEMANTICS_CHANGED = "PARAMETER_SEMANTICS_CHANGED"
     SOURCE_ONLY_CHANGE = "SOURCE_ONLY_CHANGE"
 
 
@@ -174,21 +175,26 @@ class InventorySnapshot(BaseModel):
     deployment_id: Optional[str] = None
     source_types: List[str] = Field(default_factory=lambda: ["HAR"])
     captured_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    capture_completeness: str = CaptureCompleteness.COMPLETE.value
+    capture_completeness: str = CaptureCompleteness.PARTIAL.value
     endpoints: Dict[str, NormalizedEndpoint] = Field(default_factory=dict)
     snapshot_digest: Optional[str] = None
 
     def compute_snapshot_digest(self) -> str:
-        """Computes deterministic digest over sorted endpoint identities and signatures."""
+        """Computes deterministic digest over sorted endpoint identities, signatures, observed roles, and capture metadata."""
         import hashlib
         import json
         items = sorted([
-            (ep_id, ep.endpoint_signature)
+            (
+                ep_id,
+                ep.endpoint_signature,
+                sorted(ep.roles_observed),
+            )
             for ep_id, ep in self.endpoints.items()
         ])
         payload = {
             "asset_id": self.asset_id,
             "deployment_id": self.deployment_id,
+            "capture_completeness": self.capture_completeness,
             "endpoints": items,
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
