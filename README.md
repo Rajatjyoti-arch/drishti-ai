@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python Version](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![Track](https://img.shields.io/badge/VOYAGEHACK_4.0-Fraud_Prevention_%26_Security-orange)](https://unstop.com)
-[![Status](https://img.shields.io/badge/Milestone-P0_Frozen_Baseline-success)](#)
+[![Status](https://img.shields.io/badge/Milestone-P0_Approved_Architecture-success)](#)
 
 > *"See the journey. Understand the risk. Prove the vulnerability."*
 
@@ -13,7 +13,7 @@
 
 ## 🏗️ Architecture Overview
 
-Rather than analyzing disconnected HTTP endpoints, Drishti AI models the complete travel state machine and enforces platform invariants across deployments.
+Rather than analyzing disconnected HTTP endpoints, Drishti AI models the complete travel state machine and enforces platform invariants across continuous deployments.
 
 ![Drishti AI Architecture](docs/architecture/Drishti_AI_Architecture.png)
 
@@ -34,29 +34,34 @@ B2B travel platforms connect airlines, hotel aggregators, and tour suppliers wit
 
 Drishti AI is built on four non-negotiable architectural mandates:
 
-### 1. Machine-Enforced Authorization Contract
-All testing is bounded by a machine-readable, deterministic policy (`configs/auth_contract.json`). Any outbound request violating target allowlists, concurrency ceilings ($\le 2$), or rate budgets ($\le 5\text{ req/s}$) is dropped before network socket allocation. Prohibits destructive actions (no `DROP`, no DoS, no raw shell commands).
+### 1. Machine-Enforced Authorization Contract & Configurable Budgets
+All testing is strictly bounded by a signed, machine-readable contract (`configs/auth_contract.json`) and authoritative execution budgets (`configs/test_budgets.yaml`). The Policy Gate deterministically enforces:
+* Configurable token-bucket rate limits and concurrency semaphores.
+* Per-test request ceilings and global session budgets (retries consume from the same budget).
+* Automated circuit breakers tripping on latency spikes or consecutive 5xx errors.
+* Strict prohibition on destructive actions (no `DROP`, no DoS, no raw shell commands).
 
 ### 2. Evidence-Backed LLM Provenance
-The LLM *proposes*; deterministic code *decides*. Every inferred endpoint, role permission, and parameter semantic must carry cryptographic provenance anchoring it to an observed raw network request (HAR frame ID + SHA-256 packet hash + confidence score $\ge 0.85$). Hallucinations are rejected at ingestion.
+The LLM *proposes*; deterministic code *decides*. Every inferred endpoint, role permission, and parameter semantic must carry cryptographic provenance anchoring it to an observed raw network request (HAR frame ID + SHA-256 packet hash + confidence score). Hallucinations are rejected at ingestion.
 
-### 3. Strengthened Invariant Verification (I-01 BOLA)
-Drishti AI rejects naive HTTP 200 checks. An invariant violation is confirmed only if:
-* The response payload explicitly asserts ownership by the **victim tenant** (`owner_agency_id == victim_tenant_id`).
-* The payload exposes sensitive fields (passenger full names, passport numbers, PNRs, or billing vouchers).
+### 3. Black-Box Invariant Verification (Zero Database Assumptions)
+Drishti AI requires zero internal database access. Invariant verification is conducted black-box:
+* **Legitimate Baseline:** An authorized Agency A session creates a synthetic booking containing an injected unique canary.
+* **Cross-Tenant Probe:** An authenticated Agency B session attempts to access that object reference.
+* **Invariant Oracle:** A violation is confirmed **if and only if** Agency B observes Agency A's protected canary or mutates its state, while Agency A retains authorized access.
 
-### 4. Strict Reproducibility
+### 4. Strict Reproducibility & Invariant Restoration
 Every confirmed finding includes:
 * The exact ordered state-setup request sequence.
 * A self-contained, copy-pasteable cURL command with sanitized test tokens.
-* Cryptographic request/response evidence hashes.
-* An automated retest recipe that verifies ticket closure after remediation.
+* Cryptographic request/response evidence digests stored in a tamper-evident hash-chained ledger.
+* An automated retest recipe that verifies the **security invariant is restored** post-remediation, regardless of whether the server responds with 403, 404, or authorized empty data.
 
 ---
 
 ## ⚡ The Frozen 7-Step Single Loop (Milestone 1)
 
-All active engineering is frozen around delivering **one complete, reproducible security finding** against the organizer's authorized staging sandbox:
+All active engineering is frozen around delivering **one complete, reproducible security finding** against an authorized staging target:
 
 ```
 [Target Change Ingested]
@@ -65,22 +70,22 @@ All active engineering is frozen around delivering **one complete, reproducible 
 1. Detect Change ──────────────► Webhook, commit SHA, or HAR bundle diff
            │
            ▼
-2. Discover Endpoints ─────────► Playwright crawl + provenance-backed LLM inference
+2. Discover Endpoints ─────────► Playwright crawl (with BrowserGuard) + provenance inference
            │
            ▼
 3. Identify Invariant Candidate ► Match against I-01 (BOLA) or I-02 (Pricing Tampering)
            │
            ▼
-4. Execute Authorized Test ────► Deterministic Policy Gate enforces allowlist & rates
+4. Execute Authorized Test ────► Deterministic Policy Gate enforces allowlist & budgets
            │
            ▼
-5. Independent Verification ───► Clean fixtures + negative controls + ownership checks
+5. Independent Verification ───► Black-box canary oracle + negative controls
            │
            ▼
 6. Synthesize Report ──────────► Self-contained cURL PoC, response diff, code patch
            │
            ▼
-7. Retest After Patch ─────────► Post-commit re-run confirms 403 Forbidden & closes issue
+7. Retest After Patch ─────────► Automated re-run verifies security invariant is restored
 ```
 
 ---
@@ -90,12 +95,12 @@ All active engineering is frozen around delivering **one complete, reproducible 
 | Module / Component | P0 Functional Scope | Technical Dependencies | Potential Failure Modes | Mitigation & Fallback Strategy |
 | :--- | :--- | :--- | :--- | :--- |
 | **Change Ingestion** | Ingest commit webhook, endpoint diff, or static HAR bundle. | Python 3.11+, Git diff parser, JSON Schema. | Missing/malformed webhook payloads; schema drifts. | Fallback to manual directory/HAR file watcher with standard schema validator. |
-| **Recon & Crawl** | Extract authenticated routes across 2 agency roles via browser. | Playwright (Chromium), mitmproxy / HAR parser. | Anti-bot mechanisms, SPA hydration delays, dynamic element selectors. | Pre-recorded authenticated session tokens; deterministic URL list seeding. |
-| **Endpoint Inference** | Infer endpoint path, parameters, roles, and journey position. | LLM (Claude 3.5 Sonnet / GPT-4o) + Pydantic v2. | Hallucinated routes, fabricated parameter types, missing auth headers. | **Strict Provenance Gate:** Every route must anchor to a real HAR request ID with confidence score $\ge 0.85$. |
-| **Policy Gate & Safety** | Deterministic enforcement of domain allowlist, rate limits, budgets. | Token-bucket algorithm, Python standard library. | Misconfigured regex matching out-of-scope hosts; rate limit bursts. | Default-deny CIDR & host regex; hard concurrency ceiling $= 2$; immediate kill switch. |
-| **Specialist Executor** | Execute BOLA (I-01) and Tariff Tampering (I-02) probes. | HTTPX (async), isolated credential broker. | Staging environment 500 errors; session token expiration during test. | Synthetic token refresher; exponential backoff on latency $> 300\text{ms}$; circuit breaker. |
-| **Independent Verifier** | Reproduce candidate findings using clean fixtures & negative controls. | Isolated test runner, JSON path evaluator. | Flaky network false positives; verifier bias inheriting planner assumptions. | Strict separation: Verifier runs separate fixture setup and must pass negative control. |
-| **Retest Engine** | Re-run minimal proof against updated commit SHA; verify remediation. | Git webhook listener, test runner. | Premature ticket closure due to partial fixes or caching. | Invariant assertion: Ticket closes **only** if negative control passes and exploit yields 403/404. |
+| **Recon & Crawl** | Extract authenticated routes across 2 agency roles via browser. | Playwright (Chromium), mitmproxy / HAR parser. | Anti-bot mechanisms, SPA hydration delays, dynamic element selectors. | BrowserGuard intercepts traffic; pre-recorded authenticated session tokens. |
+| **Endpoint Inference** | Infer endpoint path, parameters, roles, and journey position. | LLM (Claude 3.5 Sonnet / GPT-4o) + Pydantic v2. | Hallucinated routes, fabricated parameter types, missing auth headers. | **Strict Provenance Gate:** Every route must anchor to a real HAR request ID with SHA-256 hash. |
+| **Policy Gate & Safety** | Deterministic enforcement of domain allowlist, rate limits, budgets. | Token-bucket algorithm, Python standard library. | Misconfigured regex matching out-of-scope hosts; rate limit bursts. | Default-deny CIDR & host regex; configurable concurrency ceiling; immediate kill switch. |
+| **Specialist Executor** | Execute BOLA (I-01) and Tariff Tampering (I-02) probes. | SafeHttpClient, isolated CredentialBroker. | Staging environment 500 errors; session token expiration during test. | Scoped credential broker; exponential backoff on latency spikes; circuit breaker. |
+| **Independent Verifier** | Reproduce candidate findings using clean fixtures & negative controls. | Isolated test runner, JSON path evaluator. | Flaky network false positives; verifier bias inheriting planner assumptions. | Strict separation: Canary-based invariant oracle and negative control verification. |
+| **Retest Engine** | Re-run minimal proof against updated commit SHA; verify remediation. | Git webhook listener, test runner. | Premature ticket closure due to partial fixes or caching. | Invariant assertion: Ticket closes **only** if invariant is restored and negative control passes. |
 
 ---
 
@@ -107,27 +112,39 @@ drishti-ai/
 ├── pyproject.toml                      # Python 3.11+ packaging, dependencies, and lint configs
 ├── configs/
 │   ├── auth_contract.json              # Active authorization contract (domains, accounts, limits)
-│   └── test_profiles.json              # Synthetic tenant profiles (Agency A, Agency B, Sub-Agent)
+│   ├── test_profiles.json              # Synthetic tenant profiles (Agency A, Agency B, Sub-Agent)
+│   └── test_budgets.yaml               # Authoritative execution & safety budgets (configurable)
 ├── docs/
-│   ├── architecture/                   # Architecture diagrams (.png and editable .drawio)
+│   ├── architecture/                   # Architecture diagrams (.png, .svg, and editable .drawio)
 │   ├── DRISHTI_AI_MASTER_PLAN.md       # Comprehensive system master plan
 │   └── DRISHTI_AI_IMPLEMENTATION_SPEC.md # Detailed engineering and module specification
 ├── drishti/
 │   ├── __init__.py
 │   ├── main.py                         # Single-loop CLI entrypoint
 │   ├── core/                           # Configuration, exceptions, and Pydantic data schemas
-│   ├── discovery/                      # Playwright headless crawler and HAR traffic parser
-│   ├── graph/                          # Travel Security Intelligence Graph (NetworkX)
-│   ├── planner/                        # LLM hypothesis planner with provenance validation
-│   ├── policy/                         # Deterministic Policy Gate, rate limiter, and audit ledger
-│   ├── executors/                      # BOLA (I-01) and Tariff (I-02) specialist executors
-│   ├── verifier/                       # Independent reproduction runner and negative controls
-│   ├── reporter/                       # Structured ticket and cURL PoC synthesizer
-│   └── retest/                         # Post-deployment remediation verification engine
+│   │   ├── config.py                   # Typed ExecutionBudgets loader
+│   │   ├── contract.py                 # Authorization Contract model
+│   │   ├── models.py                   # Structured schemas (PolicyAction, OutgoingTestRequest)
+│   │   └── exceptions.py               # PolicyViolationError, OutOfScopeError, EmergencyStopTriggered
+│   ├── policy/                         # Deterministic Policy Gate & Safety Boundaries
+│   │   ├── scope_validator.py          # FQDN, port, scheme, and DNS destination resolver
+│   │   ├── egress_guard.py             # Network egress boundaries & 3xx redirect re-validation
+│   │   ├── rate_limiter.py             # MultiBudgetRateLimiter (token-bucket, concurrency, budgets)
+│   │   ├── health_monitor.py           # Target latency monitor & automated circuit breaker
+│   │   ├── credential_broker.py        # Scoped secrets broker isolating tokens from LLM/logs
+│   │   ├── approval_manager.py         # Human approval gate for elevated/high-risk test actions
+│   │   ├── browser_guard.py            # Playwright route interceptor aborting out-of-scope traffic
+│   │   ├── gate.py                     # Central deterministic Policy Gate orchestrating all boundaries
+│   │   └── client.py                   # SafeHttpClient (the ONLY approved network transport interface)
+│   └── audit/                          # Tamper-Evident Hash-Chained Audit Ledger
+│       ├── hash_chain.py               # Canonical JSON serialization & SHA-256 hash chaining
+│       ├── ledger_verifier.py          # Cryptographic chain verifier detecting tampering/reordering
+│       ├── evidence_store.py           # Sanitized evidence storage with automated PII redaction
+│       └── ledger.py                   # Append-only SQLite ledger with signed checkpoints
 └── tests/
-    ├── unit/                           # Tests for policy gate, rate limiter, and parsers
-    ├── integration/                    # Mock staging integration tests
-    └── fixtures/                       # Recorded HAR files and synthetic staging responses
+    ├── test_scope_validation.py        # 5 tests: scheme, port, host allowlist, redirect safety
+    ├── test_audit_integrity.py         # 5 tests: chain validation, payload modification, deletion
+    └── test_policy_bypass.py           # 6 tests: destructive payloads, budget caps, circuit breaker
 ```
 
 ---
@@ -151,8 +168,8 @@ source .venv/bin/activate
 # Install dependencies
 pip install -e ".[dev]"
 
-# Install Playwright browser binaries
-playwright install chromium
+# Run Stage 1 security test suite
+pytest -v tests/
 ```
 
 ### Validate Authorization Contract
@@ -162,27 +179,15 @@ python3 -m drishti.main verify-contract --contract-path configs/auth_contract.js
 
 ---
 
-## 🗓️ Six-Session Engineering Roadmap
+## 🗓️ Engineering Roadmap
 
-* [x] **Session 1: Safety Foundation:** `auth_contract.json` schema, deterministic `PolicyGate` (allowlist, token-bucket limiter, SQLite ledger).
-* [ ] **Session 2: Recon & Provenance:** Playwright role journeys, HAR indexing, LLM schema inference with SHA-256 evidence anchoring.
-* [ ] **Session 3: Travel Intelligence Graph:** NetworkX model of `Search ➔ Quote ➔ Hold ➔ Book` and multi-tenant invariant bindings.
-* [ ] **Session 4: Specialist Executors:** Implement `BOLAExecutor` (I-01) and `PricingExecutor` (I-02) dispatching through the Policy Gate.
-* [ ] **Session 5: Independent Verifier:** Clean fixture runner, negative control baseline, and sensitive field exposure assertion.
-* [ ] **Session 6: Milestone 1 Acceptance:** Full 7-stage loop execution against staging sandbox with automated retest closure.
-
----
-
-## 🏆 Alignment with TBO VOYAGEHACK 4.0 Criteria
-
-| Criterion | Weight | Drishti AI Architectural Guarantee |
-| :--- | :--- | :--- |
-| **Valid Findings & Severity** | **30%** | Targets deep B2B travel business logic (IDOR, fare tampering, refund races) rather than shallow generic fuzzing. |
-| **Precision & Noise Control** | **20%** | Decoupled **Independent Verifier** with negative controls ensures verified reproducibility. |
-| **Safety & Scope Discipline** | **20%** | Machine-enforced **Authorization Contract** with hard rate limits ($\le 5\text{ req/s}$) and emergency kill switches. |
-| **Speed After Change** | **10%** | Event-driven change triggers execute targeted invariant tests in minutes. |
-| **Report Quality & Actionability** | **10%** | Developer-ready tickets featuring self-contained cURL reproduction recipes and remediation code patches. |
-| **Discovery & API Inventory** | **10%** | Reconciles traffic logs to categorize **Active**, **Zombie**, and **Shadow** APIs with actionable governance. |
+* [x] **Stage 1: Secure Execution Foundation:** Tamper-evident ledger, ScopeValidator with DNS checks, MultiBudgetRateLimiter, CredentialBroker, BrowserGuard, and SafeHttpClient.
+* [ ] **Stage 2: Deterministic Travel Target:** Common travel simulator (`mock_travel_api.py`), seeded BOLA (`vulnerable_app.py`), and authoritative pricing (`patched_app.py`).
+* [ ] **Stage 3: Discovery & Normalization:** HAR indexing, route normalization, Playwright crawl with BrowserGuard.
+* [ ] **Stage 4: Travel Intelligence Graph:** NetworkX model of `Search ➔ Quote ➔ Hold ➔ Book` and multi-tenant invariant bindings.
+* [ ] **Stage 5: Specialist Executors:** Implement `BOLAExecutor` (I-01) and `PricingExecutor` (I-02) dispatching through the Policy Gate.
+* [ ] **Stage 6: Black-Box Independent Verifier:** Canary data detection, ownership validation, and invariant oracles.
+* [ ] **Stage 7: Retest Engine & Acceptance:** End-to-end change-to-finding-to-fix-to-retest demonstration against staging sandbox.
 
 ---
 
