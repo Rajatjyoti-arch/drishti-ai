@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "contract_version": "1.0.0",
+  "permitted_targets": [
+    "staging.tbo-sandbox.internal",
+    "api-staging.tbo.com",
+    "127.0.0.1",
+    "localhost"
+  ],
+  "test_tenants": {
+    "attacker_tenant_id": "AG_MUMBAI_01",
+    "victim_tenant_id": "AG_DELHI_02",
+    "subagent_tenant_id": "SUB_MUMBAI_01A"
+  },
+  "request_budgets": {
+    "max_requests_per_second": 5.0,
+    "max_concurrent_connections": 2,
+    "max_total_requests_per_run": 250
+  },
+  "prohibited_actions": [
+    "DROP",
+    "DELETE_PRODUCTION_DATA",
+    "DOS_BURST",
+    "PERSISTENT_DATA_CORRUPTION",
+    "BULK_DATA_EXTRACTION",
+    "REAL_PAYMENT_SUBMISSION"
+  ],
+  "emergency_stop_triggers": {
+    "latency_spike_threshold_ms": 500,
+    "consecutive_5xx_threshold": 3,
+    "out_of_scope_attempt_action": "IMMEDIATE_TERMINATE"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "profiles": [
+    {
+      "tenant_id": "AG_MUMBAI_01",
+      "agency_name": "Apex Travel Mumbai",
+      "role": "AGENCY_ADMIN",
+      "auth_type": "BEARER_TOKEN",
+      "mock_token": "eyJhGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfMDExIiwidGVuYW50IjoiQUdfTVVNQkFJXzAxIiwicm9sZSI6IkFETUlOIn0.mock",
+      "credit_limit": 500000.0,
+      "currency": "INR"
+    },
+    {
+      "tenant_id": "AG_DELHI_02",
+      "agency_name": "Bharat Tours Delhi",
+      "role": "AGENCY_ADMIN",
+      "auth_type": "BEARER_TOKEN",
+      "mock_token": "eyJhGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfMDIyIiwidGVuYW50IjoiQUdfREVMSElfMDIiLCJyb2xlIjoiQURNSU4ifQ.mock",
+      "credit_limit": 750000.0,
+      "currency": "INR"
+    },
+    {
+      "tenant_id": "SUB_MUMBAI_01A",
+      "agency_name": "Apex Sub-Agent Andheri",
+      "parent_tenant_id": "AG_MUMBAI_01",
+      "role": "SUB_AGENT",
+      "auth_type": "BEARER_TOKEN",
+      "mock_token": "eyJhGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c3JfMDMzIiwidGVuYW50IjoiU1VCX01VTUJBSV8wMUEiLCJyb2xlIjoiU1VCX0FHRU5UIn0.mock",
+      "credit_limit": 50000.0,
+      "currency": "INR"
+    }
+  ]
+}
