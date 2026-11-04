@@ -57,6 +57,12 @@ Every confirmed finding includes:
 * Cryptographic request/response evidence digests stored in a tamper-evident hash-chained ledger.
 * An automated retest recipe that verifies the **security invariant is restored** post-remediation, regardless of whether the server responds with 403, 404, or authorized empty data.
 
+### 5. Hybrid Architecture: Rust Security Kernel + Python Intelligence
+To achieve mathematically unbypassable security and zero-overhead crypto performance, Drishti AI implements a hybrid execution boundary:
+* **Rust Security Kernel (`drishti-guard` & `drishti-core`):** Owns physical network sockets, OS-level process isolation, non-reusable bound authorization decisions, sub-millisecond SHA-256 hash chaining, and credential isolation.
+* **Python Intelligence Layer:** Owns LLM hypothesis generation (LangGraph), Playwright browser crawling (official SDK), HAR traffic decomposition, and NetworkX travel state machines.
+* **Axum Synthetic Travel Target (`mock-travel-api`):** Shared Rust domain contracts running both Vulnerable (seeded I-01/I-02 flaws) and Patched modes for high-speed differential testing.
+
 ---
 
 ## ⚡ The Frozen 7-Step Single Loop (Milestone 1)
@@ -141,10 +147,27 @@ drishti-ai/
 │       ├── ledger_verifier.py          # Cryptographic chain verifier detecting tampering/reordering
 │       ├── evidence_store.py           # Sanitized evidence storage with automated PII redaction
 │       └── ledger.py                   # Append-only SQLite ledger with signed checkpoints
-└── tests/
-    ├── test_scope_validation.py        # 5 tests: scheme, port, host allowlist, redirect safety
-    ├── test_audit_integrity.py         # 5 tests: chain validation, payload modification, deletion
-    └── test_policy_bypass.py           # 6 tests: destructive payloads, budget caps, circuit breaker
+├── tests/
+│   ├── fixtures/                       # Deterministic B2B Travel Simulator & Test Personas
+│   │   ├── mock_travel_api.py          # Base travel simulator (search, quotes, holds, bookings, canaries)
+│   │   ├── vulnerable_app.py           # Seeded BOLA (I-01) & pricing tampering (I-02) flaws
+│   │   └── patched_app.py              # Tenant-isolated & server-authoritative pricing implementation
+│   ├── test_scope_validation.py        # 5 tests: scheme, port, host allowlist, redirect safety
+│   ├── test_audit_integrity.py         # 5 tests: chain validation, payload modification, deletion
+│   ├── test_policy_bypass.py           # 6 tests: destructive payloads, budget caps, circuit breaker
+│   ├── test_credential_isolation.py    # 2 tests: secret masking, expiration, target-binding
+│   ├── test_evidence_redaction.py      # 2 tests: automated PII/token scrubbing, payload limits
+│   ├── test_approval_manager.py        # 2 tests: human approval lifecycle, risk thresholds
+│   ├── test_concurrency_budgets.py     # 2 tests: parallel worker budget contention, semaphores
+│   ├── test_decision_binding.py        # 2 tests: cryptographic decision nonce binding, replay rejection
+│   ├── test_stage2_fixtures.py         # 6 tests: differential verification of I-01 and I-02
+│   └── test_fixture_reset.py           # 2 tests: environment reset isolation and state independence
+└── rust/                               # Rust Security Kernel & High-Performance Services
+    ├── Cargo.toml                      # Cargo workspace root
+    └── crates/
+        ├── drishti-core/               # Shared domain contracts, Serde models, JSON Schema
+        ├── drishti-guard/              # Native security kernel daemon & physical network mediator
+        └── mock-travel-api/            # Axum B2B travel simulator (vulnerable & patched modes)
 ```
 
 ---
@@ -181,8 +204,11 @@ python3 -m drishti.main verify-contract --contract-path configs/auth_contract.js
 
 ## 🗓️ Engineering Roadmap
 
-* [x] **Stage 1: Secure Execution Foundation:** Tamper-evident ledger, ScopeValidator with DNS checks, MultiBudgetRateLimiter, CredentialBroker, BrowserGuard, and SafeHttpClient.
-* [ ] **Stage 2: Deterministic Travel Target:** Common travel simulator (`mock_travel_api.py`), seeded BOLA (`vulnerable_app.py`), and authoritative pricing (`patched_app.py`).
+* [x] **Stage 1: Secure Execution Foundation:** Tamper-evident ledger, ScopeValidator with DNS checks, MultiBudgetRateLimiter, CredentialBroker, BrowserGuard, and SafeHttpClient. *(Frozen at git tag `stage1-python-reference`, 34 passing tests).*
+* [x] **Stage 2: Deterministic Travel Target:** Common travel simulator (`mock_travel_api.py`), seeded BOLA (`vulnerable_app.py`), and authoritative pricing (`patched_app.py`).
+* [ ] **Rust Phase 1: Shared Domain Contracts (`drishti-core`):** Strong typing, Serde models, Schemars JSON Schema generation, and golden serialization compatibility tests.
+* [ ] **Rust Phase 2: High-Performance Travel Simulator (`mock-travel-api`):** Axum target running both vulnerable and patched services on identical domain models.
+* [ ] **Rust Phase 3: Native Security Kernel (`drishti-guard`):** Rusqlite single-writer ledger, SHA-256 hash chaining, token-bucket limiter, Reqwest transport, Unix socket IPC.
 * [ ] **Stage 3: Discovery & Normalization:** HAR indexing, route normalization, Playwright crawl with BrowserGuard.
 * [ ] **Stage 4: Travel Intelligence Graph:** NetworkX model of `Search ➔ Quote ➔ Hold ➔ Book` and multi-tenant invariant bindings.
 * [ ] **Stage 5: Specialist Executors:** Implement `BOLAExecutor` (I-01) and `PricingExecutor` (I-02) dispatching through the Policy Gate.
