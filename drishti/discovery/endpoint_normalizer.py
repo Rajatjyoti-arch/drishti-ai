@@ -1,7 +1,8 @@
 """Deterministic endpoint path normalization and parameter discovery engine.
 
 Analyzes raw observed API requests, extracts query parameters, detects dynamic path
-segments (UUIDs, prefixed IDs, integers, positional variance), and preserves static keywords.
+segments (UUIDs, prefixed IDs, integers, positional variance), preserves static keywords,
+and enforces data minimization and credential redaction.
 """
 
 import math
@@ -11,6 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 from drishti.discovery.models import (
     ConfidenceAssessment,
+    EndpointObservation,
     NormalizedEndpoint,
     ParameterCandidate,
     ParameterClassification,
@@ -27,19 +29,29 @@ STATIC_KEYWORDS: Set[str] = {
     "agent", "sub_agent", "auditor", "users", "bookings", "flights",
     "hotels", "reports", "v1", "v2", "v3", "api", "test", "catalog",
     "pricing", "tariff", "fares", "details", "all", "active", "history",
+    "overview", "profile", "settings", "passengers", "pnr", "webhook",
+    "webhooks", "docs", "schema", "openapi", "swagger", "ping", "live",
+    "ready", "public",
 }
 
-# Sensitive query parameter keys that must be redacted
-SENSITIVE_PARAM_NAMES: Set[str] = {
-    "token", "api_key", "apikey", "secret", "password", "session",
-    "session_id", "auth", "authorization", "key", "access_token",
-}
+# Regex pattern for sensitive query parameter keys and tokens
+RE_SENSITIVE_PARAM = re.compile(
+    r"(?:token|jwt|secret|password|passwd|auth|session|apikey|api_key|access_token|client_secret|sig|signature|bearer)",
+    re.IGNORECASE,
+)
 
-# Regex patterns for dynamic identifier recognition
-RE_UUID = re.compile(
+# Strict UUIDv4 pattern (RFC 4122 variant 1, version 4)
+RE_UUID_V4 = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+# Generic UUID pattern (any version/variant)
+RE_GENERIC_UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
+
 RE_INTEGER = re.compile(r"^\d+$")
 RE_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -50,6 +62,8 @@ RE_QUOTE_PREFIX = re.compile(r"^(?:QUO|quote|q)[_-][0-9a-zA-Z]+$", re.IGNORECASE
 RE_FLIGHT_PREFIX = re.compile(r"^(?:FLT|AI|6E|EK|UK|BA|DL|AA|LH)[_-]?[0-9]{3,4}$", re.IGNORECASE)
 RE_TENANT_PREFIX = re.compile(r"^(?:AGN|agency|tenant|supplier)[_-][0-9a-zA-Z]+$", re.IGNORECASE)
 
+MAX_OBSERVED_VALUES_SAMPLE = 3
+
 
 def calculate_shannon_entropy(s: str) -> float:
     """Computes Shannon entropy of an alphanumeric segment."""
@@ -59,24 +73,17 @@ def calculate_shannon_entropy(s: str) -> float:
     return -sum(p * math.log2(p) for p in prob)
 
 
-class EndpointObservation:
-    """A raw observed HTTP request to be normalized."""
-
-    def __init__(
-        self,
-        method: str,
-        raw_url: str,
-        observation_id: str = "OBS-001",
-        source: str = "HAR",
-        canonical_digest: Optional[str] = None,
-        role: Optional[str] = None,
-    ):
-        self.method = method.upper()
-        self.raw_url = raw_url
-        self.observation_id = observation_id
-        self.source = source
-        self.canonical_digest = canonical_digest
-        self.role = role
+def is_recognized_dynamic_pattern(seg: str) -> bool:
+    """Returns True if segment matches a recognized dynamic identifier pattern."""
+    if RE_UUID_V4.match(seg) or RE_GENERIC_UUID.match(seg):
+        return True
+    if RE_BOOKING_PREFIX.match(seg) or RE_HOLD_PREFIX.match(seg) or RE_QUOTE_PREFIX.match(seg):
+        return True
+    if RE_FLIGHT_PREFIX.match(seg) or RE_TENANT_PREFIX.match(seg):
+        return True
+    if RE_DATE.match(seg) or RE_INTEGER.match(seg):
+        return True
+    return False
 
 
 class EndpointNormalizer:
@@ -100,7 +107,7 @@ class EndpointNormalizer:
 
         for i, seg in enumerate(segments):
             prev_seg = segments[i - 1].lower() if i > 0 else ""
-            is_param, param_name, sem_type, score_boost, signal = self._classify_segment(
+            is_param, param_name, sem_type, score_boost, signal, classification = self._classify_segment(
                 seg, prev_seg
             )
 
@@ -111,7 +118,7 @@ class EndpointNormalizer:
                         name=param_name,
                         location=ParameterLocation.PATH.value,
                         semantic_type=sem_type.value,
-                        classification=ParameterClassification.INFERRED.value,
+                        classification=classification,
                         observed_values=[seg],
                     )
                 )
@@ -151,124 +158,152 @@ class EndpointNormalizer:
     def cluster_and_normalize(
         self, observations: List[EndpointObservation]
     ) -> List[NormalizedEndpoint]:
-        """Clusters multiple raw observations across methods and paths, using positional
+        """Clusters multiple raw observations partitioned by (origin, method, static_prefix, segment_count),
 
-        variance to confirm dynamic parameter slots with high confidence.
+        using positional variance and pattern recognition to discover route templates.
         """
-        # Group observations by (method, segment_count)
-        groups: Dict[Tuple[str, int], List[Tuple[EndpointObservation, List[str]]]] = {}
+        # Group observations by (origin, method, static_prefix_signature, segment_count)
+        groups: Dict[Tuple[str, str, Tuple[str, ...], int], List[Tuple[EndpointObservation, List[str]]]] = {}
 
         for obs in observations:
             parsed = urlparse(obs.raw_url)
+            origin = obs.get_origin()
             path = parsed.path.strip("/")
             segments = [s for s in path.split("/") if s]
-            key = (obs.method, len(segments))
+            static_prefix = self._extract_static_prefix(segments)
+            key = (origin, obs.method.upper(), static_prefix, len(segments))
             groups.setdefault(key, []).append((obs, segments))
 
         results: List[NormalizedEndpoint] = []
 
-        for (method, count), entries in groups.items():
+        for (origin, method, static_prefix, count), entries in groups.items():
             if not entries:
                 continue
 
-            # First pass: check which static routes branch off (e.g. /search)
-            # Partition entries by static segments
+            # Partition entries by static branches to keep static alternatives separate
             partitioned = self._partition_by_static_branches(entries)
 
             for sub_entries in partitioned:
                 normalized = self._normalize_clustered_group(method, count, sub_entries)
                 results.append(normalized)
 
-        return results
+        # Sort results deterministically by endpoint key
+        return sorted(results, key=lambda e: e.endpoint_key)
+
+    def _extract_static_prefix(self, segments: List[str]) -> Tuple[str, ...]:
+        """Extracts the leading sequence of static segments before any dynamic parameter."""
+        prefix: List[str] = []
+        for seg in segments:
+            if is_recognized_dynamic_pattern(seg) or seg.lower() not in self.static_keywords:
+                # First non-static or dynamic segment marks end of static prefix
+                if is_recognized_dynamic_pattern(seg):
+                    break
+                # If it's a known static keyword, keep it in prefix
+                if seg.lower() in self.static_keywords:
+                    prefix.append(seg.lower())
+                else:
+                    prefix.append(seg.lower())
+                    break
+            else:
+                prefix.append(seg.lower())
+        return tuple(prefix)
 
     def _classify_segment(
         self, seg: str, prev_seg: str
-    ) -> Tuple[bool, str, SemanticType, float, str]:
-        """Classifies an individual path segment into static or parameter candidate."""
+    ) -> Tuple[bool, str, SemanticType, float, str, str]:
+        """Classifies an individual path segment into static or parameter candidate.
+
+        Returns (is_param, param_name, semantic_type, score_boost, signal, classification).
+        """
         seg_lower = seg.lower()
 
         # 1. Never parameterize static keywords
         if seg_lower in self.static_keywords:
-            return False, seg, SemanticType.GENERIC, 0.0, "static_keyword"
+            return False, seg, SemanticType.GENERIC, 0.0, "static_keyword", ParameterClassification.CONFIRMED.value
 
-        # 2. Check UUID pattern
-        if RE_UUID.match(seg):
+        # 2. Strict UUIDv4 pattern
+        if RE_UUID_V4.match(seg):
             param_name = f"{prev_seg.rstrip('s')}_id" if prev_seg else "uuid"
-            return True, param_name, SemanticType.UUID, 0.20, "uuid_pattern"
+            return True, param_name, SemanticType.UUID, 0.25, "uuidv4_pattern", ParameterClassification.CONFIRMED.value
 
-        # 3. Check Travel Prefixed IDs
+        # 3. Generic UUID pattern (non-v4)
+        if RE_GENERIC_UUID.match(seg):
+            param_name = f"{prev_seg.rstrip('s')}_id" if prev_seg else "uuid"
+            return True, param_name, SemanticType.UUID, 0.20, "generic_uuid_pattern", ParameterClassification.INFERRED.value
+
+        # 4. Check Travel Prefixed IDs
         if RE_BOOKING_PREFIX.match(seg) or prev_seg in ("bookings", "booking", "pnr"):
             if RE_BOOKING_PREFIX.match(seg):
-                return True, "booking_id", SemanticType.BOOKING_ID, 0.25, "booking_prefix_pattern"
+                return True, "booking_id", SemanticType.BOOKING_ID, 0.25, "booking_prefix_pattern", ParameterClassification.CONFIRMED.value
         if RE_HOLD_PREFIX.match(seg) or prev_seg in ("holds", "hold"):
             if RE_HOLD_PREFIX.match(seg):
-                return True, "hold_id", SemanticType.HOLD_ID, 0.25, "hold_prefix_pattern"
+                return True, "hold_id", SemanticType.HOLD_ID, 0.25, "hold_prefix_pattern", ParameterClassification.CONFIRMED.value
         if RE_QUOTE_PREFIX.match(seg) or prev_seg in ("quotes", "quote"):
             if RE_QUOTE_PREFIX.match(seg):
-                return True, "quote_id", SemanticType.QUOTE_ID, 0.25, "quote_prefix_pattern"
+                return True, "quote_id", SemanticType.QUOTE_ID, 0.25, "quote_prefix_pattern", ParameterClassification.CONFIRMED.value
         if RE_FLIGHT_PREFIX.match(seg) or prev_seg in ("flights", "flight"):
             if RE_FLIGHT_PREFIX.match(seg):
-                return True, "flight_id", SemanticType.FLIGHT_ID, 0.25, "flight_prefix_pattern"
+                return True, "flight_id", SemanticType.FLIGHT_ID, 0.25, "flight_prefix_pattern", ParameterClassification.CONFIRMED.value
         if RE_TENANT_PREFIX.match(seg) or prev_seg in ("agencies", "agency", "tenants"):
             if RE_TENANT_PREFIX.match(seg):
-                return True, "tenant_id", SemanticType.TENANT_ID, 0.25, "tenant_prefix_pattern"
+                return True, "tenant_id", SemanticType.TENANT_ID, 0.25, "tenant_prefix_pattern", ParameterClassification.CONFIRMED.value
 
-        # 4. Check Date pattern
+        # 5. Check Date pattern
         if RE_DATE.match(seg):
-            return True, "travel_date", SemanticType.DATE, 0.20, "date_pattern"
+            return True, "travel_date", SemanticType.DATE, 0.20, "date_pattern", ParameterClassification.CONFIRMED.value
 
-        # 5. Check Pure Integer pattern
+        # 6. Check Pure Integer pattern
         if RE_INTEGER.match(seg):
             param_name = f"{prev_seg.rstrip('s')}_id" if prev_seg else "id"
-            return True, param_name, SemanticType.NUMERIC_ID, 0.15, "integer_pattern"
+            return True, param_name, SemanticType.NUMERIC_ID, 0.15, "integer_pattern", ParameterClassification.INFERRED.value
 
-        # 6. High-entropy alphanumeric hash (e.g. "a1b2c3d4e5f6")
+        # 7. High-entropy alphanumeric hash (e.g. "a1b2c3d4e5f6")
         if len(seg) >= 8 and any(c.isdigit() for c in seg) and any(c.isalpha() for c in seg):
             entropy = calculate_shannon_entropy(seg)
             if entropy >= 2.5:
                 param_name = f"{prev_seg.rstrip('s')}_token" if prev_seg else "token"
-                return True, param_name, SemanticType.GENERIC, 0.10, "high_entropy_alphanumeric"
+                return True, param_name, SemanticType.GENERIC, 0.10, "high_entropy_alphanumeric", ParameterClassification.INFERRED.value
 
         # Default: preserve as static segment (avoid false positive normalization)
-        return False, seg, SemanticType.GENERIC, 0.0, "unrecognized_static"
+        return False, seg, SemanticType.GENERIC, 0.0, "unrecognized_static", ParameterClassification.UNCERTAIN.value
 
     def _partition_by_static_branches(
         self, entries: List[Tuple[EndpointObservation, List[str]]]
     ) -> List[List[Tuple[EndpointObservation, List[str]]]]:
-        """Separates observations where a path position contains a known static keyword
+        """Separates observations where a path position contains distinct static keywords or alternatives
 
-        from entries that contain dynamic parameters at that same position.
-        (e.g., separates /bookings/search from /bookings/TBOH_123).
+        so that /flights/domestic and /flights/international (or /bookings/search vs /bookings/TBOH_123)
+        are never collapsed together.
         """
-        # Find positions with static keywords
-        first_segments = entries[0][1]
-        length = len(first_segments)
+        if not entries:
+            return []
+        length = len(entries[0][1])
 
-        # Check each position for keyword vs non-keyword split
+        current_partitions = [entries]
         for pos in range(length):
-            keywords_found = set()
-            non_keywords_found = set()
+            next_partitions: List[List[Tuple[EndpointObservation, List[str]]]] = []
+            for partition in current_partitions:
+                static_groups: Dict[str, List[Tuple[EndpointObservation, List[str]]]] = {}
+                dynamic_group: List[Tuple[EndpointObservation, List[str]]] = []
 
-            for _, segs in entries:
-                val = segs[pos].lower()
-                if val in self.static_keywords:
-                    keywords_found.add(val)
+                for entry in partition:
+                    val = entry[1][pos].lower()
+                    if val in self.static_keywords:
+                        static_groups.setdefault(val, []).append(entry)
+                    else:
+                        dynamic_group.append(entry)
+
+                # If there are static keywords AND (dynamic entries exist OR multiple distinct static keywords exist)
+                if static_groups and (dynamic_group or len(static_groups) > 1):
+                    for kw, kw_entries in static_groups.items():
+                        next_partitions.append(kw_entries)
+                    if dynamic_group:
+                        next_partitions.append(dynamic_group)
                 else:
-                    non_keywords_found.add(val)
+                    next_partitions.append(partition)
+            current_partitions = next_partitions
 
-            if keywords_found and non_keywords_found:
-                # Branch into distinct subsets
-                partitions: List[List[Tuple[EndpointObservation, List[str]]]] = []
-                for kw in keywords_found:
-                    kw_entries = [e for e in entries if e[1][pos].lower() == kw]
-                    partitions.append(kw_entries)
-
-                dynamic_entries = [e for e in entries if e[1][pos].lower() not in keywords_found]
-                if dynamic_entries:
-                    partitions.append(dynamic_entries)
-                return partitions
-
-        return [entries]
+        return current_partitions
 
     def _normalize_clustered_group(
         self,
@@ -307,24 +342,37 @@ class EndpointNormalizer:
             sample_val = values_at_pos[0]
             prev_seg = normalized_segments[pos - 1].strip("{}") if pos > 0 else ""
 
-            # Check if all observations have identical static segment
-            if len(distinct_values) == 1 and sample_val.lower() in self.static_keywords:
-                normalized_segments.append(sample_val)
-                continue
+            # Check if all observations at this position are static keywords
+            if all(v.lower() in self.static_keywords for v in distinct_values):
+                if len(distinct_values) == 1:
+                    normalized_segments.append(sample_val)
+                    continue
 
-            # If multiple distinct values observed at this position -> confirmed dynamic variance!
+            # If multiple distinct values observed at this position -> check variance
             if len(distinct_values) > 1:
+                # Check if values match a recognized pattern
+                pattern_matches = any(is_recognized_dynamic_pattern(v) for v in distinct_values)
                 param_name = self._infer_param_name(sample_val, prev_seg)
                 sem_type = self._infer_semantic_type(sample_val, prev_seg)
                 normalized_segments.append(f"{{{param_name}}}")
+
+                # Calibrate classification: confirmed if recognized pattern + variance, else inferred
+                classification = (
+                    ParameterClassification.CONFIRMED.value
+                    if pattern_matches
+                    else ParameterClassification.INFERRED.value
+                )
+
+                # Data minimization: sample at most MAX_OBSERVED_VALUES_SAMPLE values
+                sampled_values = sorted(list(distinct_values))[:MAX_OBSERVED_VALUES_SAMPLE]
 
                 path_params.append(
                     ParameterCandidate(
                         name=param_name,
                         location=ParameterLocation.PATH.value,
                         semantic_type=sem_type.value,
-                        classification=ParameterClassification.CONFIRMED.value,
-                        observed_values=sorted(list(distinct_values)),
+                        classification=classification,
+                        observed_values=sampled_values,
                     )
                 )
                 signals.add("repeated_path_position")
@@ -332,7 +380,7 @@ class EndpointNormalizer:
                 continue
 
             # Single value: evaluate using individual heuristics
-            is_param, param_name, sem_type, _, sig = self._classify_segment(sample_val, prev_seg)
+            is_param, param_name, sem_type, _, sig, classification = self._classify_segment(sample_val, prev_seg)
             if is_param:
                 normalized_segments.append(f"{{{param_name}}}")
                 path_params.append(
@@ -340,7 +388,7 @@ class EndpointNormalizer:
                         name=param_name,
                         location=ParameterLocation.PATH.value,
                         semantic_type=sem_type.value,
-                        classification=ParameterClassification.INFERRED.value,
+                        classification=classification,
                         observed_values=[sample_val],
                     )
                 )
@@ -350,7 +398,7 @@ class EndpointNormalizer:
 
         route_template = "/" + "/".join(normalized_segments)
 
-        # Confidence score derivation
+        # Calibrated confidence scoring
         score = 0.80
         if "variance_clustering" in signals:
             score += 0.15
@@ -384,7 +432,7 @@ class EndpointNormalizer:
             return "flight_id"
         if RE_TENANT_PREFIX.match(sample_val) or prev_seg in ("agencies", "agency", "tenants"):
             return "tenant_id"
-        if RE_UUID.match(sample_val):
+        if RE_UUID_V4.match(sample_val) or RE_GENERIC_UUID.match(sample_val):
             return f"{prev_seg.rstrip('s')}_id" if prev_seg else "uuid"
         if RE_INTEGER.match(sample_val):
             return f"{prev_seg.rstrip('s')}_id" if prev_seg else "id"
@@ -402,14 +450,17 @@ class EndpointNormalizer:
             return SemanticType.FLIGHT_ID
         if RE_TENANT_PREFIX.match(sample_val) or prev_seg in ("agencies", "agency", "tenants"):
             return SemanticType.TENANT_ID
-        if RE_UUID.match(sample_val):
+        if RE_UUID_V4.match(sample_val) or RE_GENERIC_UUID.match(sample_val):
             return SemanticType.UUID
         if RE_INTEGER.match(sample_val):
             return SemanticType.NUMERIC_ID
         return SemanticType.GENERIC
 
     def _extract_query_parameters(self, query_string: str) -> List[ParameterCandidate]:
-        """Parses query string, redacts sensitive parameters, and returns typed candidates."""
+        """Parses query string, redacts sensitive parameters via regex, samples observed values,
+
+        and returns typed candidates.
+        """
         if not query_string:
             return []
 
@@ -417,8 +468,8 @@ class EndpointNormalizer:
         candidates: List[ParameterCandidate] = []
 
         for key, values in parsed_qs.items():
-            is_sensitive = key.lower() in SENSITIVE_PARAM_NAMES
-            clean_values = ["[REDACTED]"] if is_sensitive else values
+            is_sensitive = bool(RE_SENSITIVE_PARAM.search(key))
+            clean_values = ["[REDACTED]"] if is_sensitive else values[:MAX_OBSERVED_VALUES_SAMPLE]
 
             # Infer semantic type
             sem_type = SemanticType.GENERIC
