@@ -276,3 +276,76 @@ def test_corroborated_endpoint_across_har_and_js_provenance():
     sources = {p.source for p in retrieved.provenance}
     assert "HAR" in sources
     assert "JS_BUNDLE" in sources
+
+
+def test_role_expansion_detected_even_when_signature_changes():
+    """Acceptance Test 15: Role expansion is detected independently even when contract signature changes."""
+    detector = ChangeDetector()
+    ep_prev = make_endpoint(
+        "POST",
+        "/api/v1/quotes",
+        body_digest="digest_old",
+        roles=["agency_admin"],
+    )
+    # Both body_digest and roles change simultaneously
+    ep_curr = make_endpoint(
+        "POST",
+        "/api/v1/quotes",
+        body_digest="digest_new",
+        roles=["agency_admin", "sub_agent"],
+    )
+
+    snap1 = detector.build_snapshot("SNAP-01", [ep_prev])
+    snap2 = detector.build_snapshot("SNAP-02", [ep_curr])
+
+    changeset = detector.compare_snapshots(snap1, snap2)
+    change_types = [c.change_type for c in changeset.changes]
+
+    # Both the schema change AND the role expansion are detected!
+    assert ChangeType.REQUEST_SCHEMA_CHANGED.value in change_types
+    assert ChangeType.ROLE_OBSERVATION_CHANGED.value in change_types
+
+    role_change = next(c for c in changeset.changes if c.change_type == ChangeType.ROLE_OBSERVATION_CHANGED.value)
+    assert "sub_agent" in role_change.details["newly_observed_roles"]
+    assert "I-01" in role_change.recommended_invariants
+
+
+def test_multi_method_on_same_route_no_overwriting():
+    """Acceptance Test 16: Multiple HTTP methods on the same route are preserved without dictionary collisions."""
+    detector = ChangeDetector()
+    # Route supports GET and POST initially
+    ep_get = make_endpoint("GET", "/api/v1/bookings")
+    ep_post = make_endpoint("POST", "/api/v1/bookings")
+
+    # In snap2, DELETE is added to the route
+    ep_delete = make_endpoint("DELETE", "/api/v1/bookings")
+
+    snap1 = detector.build_snapshot("SNAP-01", [ep_get, ep_post])
+    snap2 = detector.build_snapshot("SNAP-02", [ep_get, ep_post, ep_delete])
+
+    changeset = detector.compare_snapshots(snap1, snap2)
+    # Verify that DELETE addition is detected and GET/POST did not overwrite each other
+    method_changes = [c for c in changeset.changes if c.change_type == ChangeType.METHOD_CHANGED.value]
+    assert len(method_changes) == 1
+    assert method_changes[0].details["added_method"] == "DELETE"
+    assert "I-01" in method_changes[0].recommended_invariants
+
+
+def test_parameter_semantic_shift_detected():
+    """Acceptance Test 17: Parameter changing from generic to domain-recognized object ID triggers I-01."""
+    detector = ChangeDetector()
+    p_generic = ParameterCandidate(name="ref_id", location=ParameterLocation.PATH.value, semantic_type=SemanticType.GENERIC.value)
+    p_booking = ParameterCandidate(name="ref_id", location=ParameterLocation.PATH.value, semantic_type=SemanticType.BOOKING_ID.value)
+
+    ep_prev = make_endpoint("GET", "/api/v1/orders/{ref_id}", params=[p_generic])
+    ep_curr = make_endpoint("GET", "/api/v1/orders/{ref_id}", params=[p_booking])
+
+    snap1 = detector.build_snapshot("SNAP-01", [ep_prev])
+    snap2 = detector.build_snapshot("SNAP-02", [ep_curr])
+
+    changeset = detector.compare_snapshots(snap1, snap2)
+    semantic_changes = [c for c in changeset.changes if c.change_type == ChangeType.PARAMETER_SEMANTICS_CHANGED.value]
+
+    assert len(semantic_changes) == 1
+    assert semantic_changes[0].affected_parameters == ["ref_id"]
+    assert "I-01" in semantic_changes[0].recommended_invariants
