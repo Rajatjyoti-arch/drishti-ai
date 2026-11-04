@@ -87,11 +87,10 @@ impl IpcServer {
         let listener = UnixListener::bind(&self.socket_path)?;
 
         // Set restrictive socket permissions (0600: read/write only by owner process)
-        if let Ok(metadata) = fs::metadata(&self.socket_path) {
-            let mut perms = metadata.permissions();
-            perms.set_mode(0o600);
-            let _ = fs::set_permissions(&self.socket_path, perms);
-        }
+        let metadata = fs::metadata(&self.socket_path)?;
+        let mut perms = metadata.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(&self.socket_path, perms)?;
 
         tracing::info!("Drishti Guard IPC server listening on {:?}", self.socket_path);
 
@@ -100,18 +99,19 @@ impl IpcServer {
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
-                    let sem_clone = Arc::clone(&connection_semaphore);
-                    let gate_clone = Arc::clone(&self.gate);
+                    // Acquire owned connection permit before spawning task to prevent task starvation
+                    let permit = match connection_semaphore.clone().try_acquire_owned() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            tracing::warn!("IPC server saturated: maximum concurrent connections reached; dropping connection");
+                            drop(stream);
+                            continue;
+                        }
+                    };
 
+                    let gate_clone = Arc::clone(&self.gate);
                     tokio::spawn(async move {
-                        // Acquire connection permit before processing
-                        let _permit = match sem_clone.try_acquire() {
-                            Ok(p) => p,
-                            Err(_) => {
-                                tracing::warn!("IPC server saturated: maximum concurrent connections reached");
-                                return;
-                            }
-                        };
+                        let _permit = permit;
                         handle_client(stream, gate_clone).await;
                     });
                 }
