@@ -56,6 +56,31 @@ class ConfidenceAssessment(BaseModel):
     signals: List[str] = Field(default_factory=list)
 
 
+class EndpointObservation(BaseModel):
+    """A raw observed HTTP request to be normalized."""
+    method: str
+    raw_url: str
+    observation_id: str = "OBS-001"
+    asset_id: str = "primary-api"
+    origin: str = ""
+    source: str = "HAR"
+    canonical_digest: Optional[str] = None
+    role: Optional[str] = None
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    response_status: Optional[int] = None
+    content_type: Optional[str] = None
+
+    def get_origin(self) -> str:
+        """Returns the explicitly specified origin or derives scheme://netloc from raw_url."""
+        if self.origin:
+            return self.origin
+        from urllib.parse import urlparse
+        parsed = urlparse(self.raw_url)
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}"
+        return ""
+
+
 class NormalizedEndpoint(BaseModel):
     """Canonical normalized API endpoint definition."""
     method: str
