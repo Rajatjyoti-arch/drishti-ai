@@ -147,6 +147,10 @@ drishti-ai/
 │   │   ├── ledger_verifier.py          # Cryptographic chain verifier detecting tampering/reordering
 │   │   ├── evidence_store.py           # Sanitized evidence storage with automated PII redaction
 │   │   └── ledger.py                   # Append-only SQLite ledger with signed checkpoints
+│   ├── discovery/                      # API Discovery & Route Normalization Engine
+│   │   ├── models.py                   # NormalizedEndpoint, ParameterCandidate, EndpointObservation
+│   │   ├── endpoint_normalizer.py      # Deterministic clustering, static keyword preservation, UUIDv4 detection
+│   │   └── har_parser.py               # Offline HAR 1.2 ingestion, canonical request digest, security redaction
 │   └── ipc/                            # Process-Isolated Unix Domain Socket Client Bridge
 │       └── client.py                   # RustGuardClient forwarding requests over /run/drishti/guard.sock
 ├── tests/
@@ -164,7 +168,9 @@ drishti-ai/
 │   ├── test_decision_binding.py        # 2 tests: cryptographic decision nonce binding, replay rejection
 │   ├── test_stage2_fixtures.py         # 6 tests: differential verification of I-01 and I-02
 │   ├── test_fixture_reset.py           # 2 tests: environment reset isolation and state independence
-│   └── test_rust_ipc_integration.py    # 3 tests: Python UDS client protocol, versioning, error propagation
+│   ├── test_rust_ipc_integration.py    # 3 tests: Python UDS client protocol, versioning, error propagation
+│   ├── test_endpoint_normalizer.py     # 11 tests: static keyword preservation, UUIDv4, wildcard redaction
+│   └── test_har_parser.py              # 9 tests: offline HAR 1.2 ingestion, digest reproducibility, safety limits
 └── rust/                               # Rust Security Kernel & High-Performance Services
     ├── Cargo.toml                      # Cargo workspace root
     ├── schemas/                        # 9 Canonical JSON Schemas generated from Rust types
@@ -213,7 +219,7 @@ python3 -m drishti.main verify-contract --contract-path configs/auth_contract.js
 * [x] **Rust Phase 1: Shared Domain Contracts (`drishti-core`):** Strong typing, Serde models, Schemars JSON Schema generation, and golden serialization compatibility tests. *(16 passing tests).*
 * [x] **Rust Phase 2: High-Performance Travel Simulator (`mock-travel-api`):** Axum target running both vulnerable and patched services on identical domain models. *(3 differential tests).*
 * [x] **Rust Phase 3: Native Security Kernel (`drishti-guard`):** Rusqlite single-writer ledger, SHA-256 hash chaining, token-bucket limiter, Reqwest transport, Unix socket IPC. *(21 passing tests).*
-* [ ] **Stage 3: Discovery & Normalization:** HAR indexing, route normalization, Playwright crawl with BrowserGuard.
+* [x] **Stage 3: Discovery & Normalization:** Deterministic endpoint normalization, static alternative branch preservation, UUIDv4 pattern recognition, wildcard query redaction, and offline HAR 1.2 parser with canonical digest computation. *(20 passing tests: 11 normalizer tests + 9 HAR parser tests).*
 * [ ] **Stage 4: Travel Intelligence Graph:** NetworkX model of `Search ➔ Quote ➔ Hold ➔ Book` and multi-tenant invariant bindings.
 * [ ] **Stage 5: Specialist Executors:** Implement `BOLAExecutor` (I-01) and `PricingExecutor` (I-02) dispatching through the Policy Gate.
 * [ ] **Stage 6: Black-Box Independent Verifier:** Canary data detection, ownership validation, and invariant oracles.
