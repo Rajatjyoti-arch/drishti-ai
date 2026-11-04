@@ -7,8 +7,10 @@
 #![deny(unsafe_code)]
 
 pub mod identity;
+pub mod money;
 
 pub use identity::{TenantContext, TenantId, UserId, UserRole};
+pub use money::{CurrencyCode, Money, MoneyError, MoneyMinor};
 
 /// Workspace release version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
