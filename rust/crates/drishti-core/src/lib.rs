@@ -8,10 +8,15 @@
 
 pub mod identity;
 pub mod money;
+pub mod policy;
 pub mod travel;
 
 pub use identity::{TenantContext, TenantId, UserId, UserRole};
 pub use money::{CurrencyCode, Money, MoneyError, MoneyMinor};
+pub use policy::{
+    CanaryDefinition, ExecutionResult, Finding, InvariantId, OutgoingTestRequest, PolicyAction,
+    PolicyDecision, PolicyModelError,
+};
 pub use travel::{
     BookRequest, Booking, BookingStatus, FlightOption, Hold, HoldRequest, HoldStatus, Quote,
     QuoteRequest, SearchRequest,
