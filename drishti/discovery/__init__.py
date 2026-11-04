@@ -5,6 +5,11 @@ from drishti.discovery.bundle_inspector import (
     DiscoveredJsRoute,
     SourceLocation,
 )
+from drishti.discovery.change_detector import (
+    ChangeDetector,
+    is_object_id_related,
+    is_pricing_related,
+)
 from drishti.discovery.endpoint_normalizer import (
     EndpointNormalizer,
     STATIC_KEYWORDS,
@@ -16,8 +21,13 @@ from drishti.discovery.har_parser import (
     extract_json_body_schema,
 )
 from drishti.discovery.models import (
+    AttackSurfaceChangeSet,
+    CaptureCompleteness,
+    ChangeType,
     ConfidenceAssessment,
+    EndpointChange,
     EndpointObservation,
+    InventorySnapshot,
     NormalizedEndpoint,
     ParameterCandidate,
     ParameterClassification,
@@ -38,6 +48,14 @@ __all__ = [
     "BundleInspector",
     "DiscoveredJsRoute",
     "SourceLocation",
+    "ChangeDetector",
+    "ChangeType",
+    "CaptureCompleteness",
+    "InventorySnapshot",
+    "EndpointChange",
+    "AttackSurfaceChangeSet",
+    "is_pricing_related",
+    "is_object_id_related",
     "ParameterCandidate",
     "ParameterLocation",
     "ParameterClassification",
