@@ -40,6 +40,7 @@ class ParameterCandidate(BaseModel):
     semantic_type: str = SemanticType.GENERIC.value
     classification: str = ParameterClassification.INFERRED.value
     observed_values: List[str] = Field(default_factory=list)
+    is_masked: bool = False
 
 
 class ProvenanceSource(BaseModel):
@@ -48,6 +49,13 @@ class ProvenanceSource(BaseModel):
     observation_id: str
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     canonical_digest: Optional[str] = None
+    creator: Optional[Dict[str, str]] = None
+    browser: Optional[Dict[str, str]] = None
+
+    @property
+    def observation_digest(self) -> Optional[str]:
+        """Alias for the captured request observation digest."""
+        return self.canonical_digest
 
 
 class ConfidenceAssessment(BaseModel):
@@ -69,15 +77,23 @@ class EndpointObservation(BaseModel):
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     response_status: Optional[int] = None
     content_type: Optional[str] = None
+    creator: Optional[Dict[str, str]] = None
+    browser: Optional[Dict[str, str]] = None
+
+    @property
+    def observation_digest(self) -> Optional[str]:
+        """Request observation digest representing this specific HTTP request."""
+        return self.canonical_digest
 
     def get_origin(self) -> str:
-        """Returns the explicitly specified origin or derives scheme://netloc from raw_url."""
+        """Returns the explicitly specified origin or derives scheme://host:port from raw_url."""
         if self.origin:
             return self.origin
         from urllib.parse import urlparse
         parsed = urlparse(self.raw_url)
-        if parsed.scheme and parsed.netloc:
-            return f"{parsed.scheme}://{parsed.netloc}"
+        if parsed.scheme and parsed.hostname:
+            port_suffix = f":{parsed.port}" if parsed.port and parsed.port not in (80, 443) else ""
+            return f"{parsed.scheme}://{parsed.hostname}{port_suffix}"
         return ""
 
 
@@ -85,8 +101,10 @@ class NormalizedEndpoint(BaseModel):
     """Canonical normalized API endpoint definition."""
     method: str
     route_template: str
+    asset_id: str = "primary-api"
     parameters: List[ParameterCandidate] = Field(default_factory=list)
     query_parameters: List[ParameterCandidate] = Field(default_factory=list)
+    body_schema_digest: Optional[str] = None
     provenance: List[ProvenanceSource] = Field(default_factory=list)
     confidence: ConfidenceAssessment
     roles_observed: List[str] = Field(default_factory=list)
@@ -96,3 +114,22 @@ class NormalizedEndpoint(BaseModel):
     def endpoint_key(self) -> str:
         """Deterministic unique key for deduplication."""
         return f"{self.method.upper()}:{self.route_template}"
+
+    @property
+    def endpoint_signature(self) -> str:
+        """Computes the contract identity digest identifying this API endpoint contract:
+        endpoint_signature = sha256(canonical_json(asset_id, method, route_template, sorted_query_keys, body_schema_digest))
+        Distinct from observation_digest, which identifies an individual captured request.
+        """
+        import hashlib
+        import json
+        query_keys = sorted([p.name for p in self.query_parameters])
+        contract = {
+            "asset_id": self.asset_id,
+            "body_schema_digest": self.body_schema_digest,
+            "method": self.method.upper(),
+            "query_keys": query_keys,
+            "route_template": self.route_template,
+        }
+        encoded = json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
