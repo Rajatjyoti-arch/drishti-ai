@@ -142,11 +142,13 @@ drishti-ai/
 │   │   ├── browser_guard.py            # Playwright route interceptor aborting out-of-scope traffic
 │   │   ├── gate.py                     # Central deterministic Policy Gate orchestrating all boundaries
 │   │   └── client.py                   # SafeHttpClient (the ONLY approved network transport interface)
-│   └── audit/                          # Tamper-Evident Hash-Chained Audit Ledger
-│       ├── hash_chain.py               # Canonical JSON serialization & SHA-256 hash chaining
-│       ├── ledger_verifier.py          # Cryptographic chain verifier detecting tampering/reordering
-│       ├── evidence_store.py           # Sanitized evidence storage with automated PII redaction
-│       └── ledger.py                   # Append-only SQLite ledger with signed checkpoints
+│   ├── audit/                          # Tamper-Evident Hash-Chained Audit Ledger
+│   │   ├── hash_chain.py               # Canonical JSON serialization & SHA-256 hash chaining
+│   │   ├── ledger_verifier.py          # Cryptographic chain verifier detecting tampering/reordering
+│   │   ├── evidence_store.py           # Sanitized evidence storage with automated PII redaction
+│   │   └── ledger.py                   # Append-only SQLite ledger with signed checkpoints
+│   └── ipc/                            # Process-Isolated Unix Domain Socket Client Bridge
+│       └── client.py                   # RustGuardClient forwarding requests over /run/drishti/guard.sock
 ├── tests/
 │   ├── fixtures/                       # Deterministic B2B Travel Simulator & Test Personas
 │   │   ├── mock_travel_api.py          # Base travel simulator (search, quotes, holds, bookings, canaries)
@@ -161,13 +163,15 @@ drishti-ai/
 │   ├── test_concurrency_budgets.py     # 2 tests: parallel worker budget contention, semaphores
 │   ├── test_decision_binding.py        # 2 tests: cryptographic decision nonce binding, replay rejection
 │   ├── test_stage2_fixtures.py         # 6 tests: differential verification of I-01 and I-02
-│   └── test_fixture_reset.py           # 2 tests: environment reset isolation and state independence
+│   ├── test_fixture_reset.py           # 2 tests: environment reset isolation and state independence
+│   └── test_rust_ipc_integration.py    # 3 tests: Python UDS client protocol, versioning, error propagation
 └── rust/                               # Rust Security Kernel & High-Performance Services
     ├── Cargo.toml                      # Cargo workspace root
+    ├── schemas/                        # 9 Canonical JSON Schemas generated from Rust types
     └── crates/
-        ├── drishti-core/               # Shared domain contracts, Serde models, JSON Schema
-        ├── drishti-guard/              # Native security kernel daemon & physical network mediator
-        └── mock-travel-api/            # Axum B2B travel simulator (vulnerable & patched modes)
+        ├── drishti-core/               # Shared domain contracts, Serde models, JSON Schema (16 tests)
+        ├── drishti-guard/              # Native security kernel daemon, UDS IPC, SQLite ledger (21 tests)
+        └── mock-travel-api/            # Axum B2B travel simulator with vulnerable & patched modes (3 tests)
 ```
 
 ---
@@ -206,9 +210,9 @@ python3 -m drishti.main verify-contract --contract-path configs/auth_contract.js
 
 * [x] **Stage 1: Secure Execution Foundation:** Tamper-evident ledger, ScopeValidator with DNS checks, MultiBudgetRateLimiter, CredentialBroker, BrowserGuard, and SafeHttpClient. *(Frozen at git tag `stage1-python-reference`, 34 passing tests).*
 * [x] **Stage 2: Deterministic Travel Target:** Common travel simulator (`mock_travel_api.py`), seeded BOLA (`vulnerable_app.py`), and authoritative pricing (`patched_app.py`).
-* [ ] **Rust Phase 1: Shared Domain Contracts (`drishti-core`):** Strong typing, Serde models, Schemars JSON Schema generation, and golden serialization compatibility tests.
-* [ ] **Rust Phase 2: High-Performance Travel Simulator (`mock-travel-api`):** Axum target running both vulnerable and patched services on identical domain models.
-* [ ] **Rust Phase 3: Native Security Kernel (`drishti-guard`):** Rusqlite single-writer ledger, SHA-256 hash chaining, token-bucket limiter, Reqwest transport, Unix socket IPC.
+* [x] **Rust Phase 1: Shared Domain Contracts (`drishti-core`):** Strong typing, Serde models, Schemars JSON Schema generation, and golden serialization compatibility tests. *(16 passing tests).*
+* [x] **Rust Phase 2: High-Performance Travel Simulator (`mock-travel-api`):** Axum target running both vulnerable and patched services on identical domain models. *(3 differential tests).*
+* [x] **Rust Phase 3: Native Security Kernel (`drishti-guard`):** Rusqlite single-writer ledger, SHA-256 hash chaining, token-bucket limiter, Reqwest transport, Unix socket IPC. *(21 passing tests).*
 * [ ] **Stage 3: Discovery & Normalization:** HAR indexing, route normalization, Playwright crawl with BrowserGuard.
 * [ ] **Stage 4: Travel Intelligence Graph:** NetworkX model of `Search ➔ Quote ➔ Hold ➔ Book` and multi-tenant invariant bindings.
 * [ ] **Stage 5: Specialist Executors:** Implement `BOLAExecutor` (I-01) and `PricingExecutor` (I-02) dispatching through the Policy Gate.
