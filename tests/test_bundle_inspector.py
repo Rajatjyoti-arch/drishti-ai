@@ -9,8 +9,11 @@ from drishti.discovery.bundle_inspector import (
     BundleInspector,
     DiscoveredJsRoute,
     SourceLocation,
+    SourceMapResolver,
+    decode_vlq_values,
 )
-from drishti.discovery.models import ParameterLocation, SemanticType
+from drishti.discovery.endpoint_normalizer import EndpointNormalizer
+from drishti.discovery.models import EndpointObservation, ParameterLocation, SemanticType
 
 
 def test_extract_fetch_call_with_template_literal():
@@ -155,8 +158,13 @@ def test_source_location_provenance_accuracy():
     assert "axios.get('/api/v1/fares')" in loc.snippet
 
 
-def test_source_map_original_file_attribution():
-    """Acceptance Test 7: Resolves minified bundle location to original source map file."""
+def test_source_map_vlq_decoding_and_remapping():
+    """Acceptance Test 7: Accurately decodes Source Map v3 VLQ segments to remap position."""
+    # Test raw VLQ decoder
+    assert decode_vlq_values("AAAA") == [0, 0, 0, 0]
+    assert decode_vlq_values("C") == [1]
+    assert decode_vlq_values("D") == [-1]
+
     minified_code = "function a(){return fetch('/api/v1/reports')}"
     source_map = {
         "version": 3,
@@ -172,11 +180,33 @@ def test_source_map_original_file_attribution():
     )
 
     assert len(routes) == 1
-    assert routes[0].location.file_path == "src/modules/reporting/ReportsView.tsx"
+    loc = routes[0].location
+    assert loc.file_path == "src/modules/reporting/ReportsView.tsx"
+    assert loc.line == 1
+    assert loc.column >= 1
+
+
+def test_source_snippet_redaction_scrubs_secrets_and_credentials():
+    """Acceptance Test 8: Scrubs sensitive bearer tokens and api keys from snippets."""
+    code = """
+    // Config with token
+    const callApi = () => fetch("https://user:mypassword@api.tbo.com/api/v1/user?token=secret_jwt_xyz123", {
+        headers: { Authorization: "Bearer eyJhbGciOi_test_jwt_secret_token" }
+    });
+    """
+    inspector = BundleInspector()
+    routes = inspector.inspect_code(code)
+
+    assert len(routes) == 1
+    loc = routes[0].location
+    assert "mypassword" not in loc.snippet
+    assert "secret_jwt_xyz123" not in loc.snippet
+    assert "eyJhbGciOi_test_jwt_secret_token" not in loc.snippet
+    assert "[REDACTED" in loc.snippet
 
 
 def test_bundle_size_safety_limits():
-    """Acceptance Test 8: Rejects bundle files exceeding configured size limit."""
+    """Acceptance Test 9: Rejects bundle files exceeding configured size limit."""
     inspector = BundleInspector(max_bundle_size_bytes=50)
 
     with tempfile.NamedTemporaryFile("w", delete=False) as tf:
@@ -188,7 +218,7 @@ def test_bundle_size_safety_limits():
 
 
 def test_no_code_execution_security():
-    """Acceptance Test 9: Never executes untrusted bundle code (pure static parsing)."""
+    """Acceptance Test 10: Never executes untrusted bundle code (pure static parsing)."""
     malicious_code = """
     // Attempting hostile execution if evaluated
     throw new Error("Malicious code executed!");
@@ -205,18 +235,20 @@ def test_no_code_execution_security():
 
 
 def test_convert_to_normalized_endpoints():
-    """Acceptance Test 10: Converts JS routes to canonical NormalizedEndpoints."""
+    """Acceptance Test 11: Converts JS routes to canonical NormalizedEndpoints with identity."""
     code = "const book = (id) => fetch(`/api/v2/bookings/${id}`);"
     inspector = BundleInspector(default_asset_id="travel-portal")
     routes = inspector.inspect_code(code, file_path="src/api.js")
 
-    endpoints = inspector.convert_to_normalized_endpoints(routes)
+    endpoints = inspector.convert_to_normalized_endpoints(routes, canonical_origin="https://portal.tbo.com")
     assert len(endpoints) == 1
 
     ep = endpoints[0]
     assert ep.method == "GET"
     assert ep.route_template == "/api/v2/bookings/{id}"
     assert ep.asset_id == "travel-portal"
+    assert ep.canonical_origin == "https://portal.tbo.com"
+    assert ep.endpoint_identity == "travel-portal:https://portal.tbo.com:GET:/api/v2/bookings/{id}"
     assert len(ep.provenance) == 1
     assert ep.provenance[0].source == "JS_BUNDLE"
     assert ep.provenance[0].canonical_digest is not None
@@ -224,12 +256,20 @@ def test_convert_to_normalized_endpoints():
 
 
 def test_cross_discovery_reconciliation():
-    """Acceptance Test 11: JS bundle route keys cleanly reconcile with HAR normalized keys."""
+    """Acceptance Test 12: JS bundle route templates reconcile with HAR normalized templates."""
     js_code = "const book = (bookingId) => axios.get(`/api/v2/bookings/${bookingId}`);"
-    inspector = BundleInspector()
+    inspector = BundleInspector(default_asset_id="tbo-core")
     js_routes = inspector.inspect_code(js_code)
-    js_endpoint = inspector.convert_to_normalized_endpoints(js_routes)[0]
+    js_endpoint = inspector.convert_to_normalized_endpoints(js_routes, canonical_origin="https://api.tbo.com")[0]
 
-    # HAR endpoint key
-    har_endpoint_key = "GET:/api/v2/bookings/{booking_id}"
-    assert js_endpoint.endpoint_key == har_endpoint_key
+    # HAR endpoint
+    har_obs = EndpointObservation(
+        method="GET",
+        raw_url="https://api.tbo.com/api/v2/bookings/TBOH_123",
+        asset_id="tbo-core",
+    )
+    har_endpoint = EndpointNormalizer().normalize_single(har_obs)
+
+    # Route template and fully namespaced endpoint_identity match perfectly!
+    assert js_endpoint.route_template == har_endpoint.route_template
+    assert js_endpoint.endpoint_identity == har_endpoint.endpoint_identity
