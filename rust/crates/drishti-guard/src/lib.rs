@@ -7,9 +7,11 @@
 
 pub mod hash_chain;
 pub mod ledger;
+pub mod scope_validator;
 
 pub use hash_chain::{canonical_serialize, LedgerEvent, GENESIS_HASH};
 pub use ledger::{AuditLedger, CheckpointRecord, LedgerError};
+pub use scope_validator::{ResolvedTarget, ScopeError, ScopeValidator};
 
 /// Release version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
