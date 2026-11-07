@@ -24,6 +24,48 @@ class PlanPhase(str, Enum):
     TEARDOWN = "TEARDOWN"                # Cleans up synthetic state if applicable
 
 
+class ParsedEndpointIdentity(BaseModel):
+    """Typed structure representing a parsed canonical endpoint identity.
+
+    Format: asset_id:canonical_origin:method:route_template
+    Supports HTTP, HTTPS, custom ports, and routes with path parameters.
+    """
+    asset_id: str = Field(..., min_length=1)
+    origin: str = Field(..., min_length=1)
+    method: str = Field(..., pattern="^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$")
+    route_template: str = Field(..., min_length=1)
+
+    model_config = {"extra": "forbid"}
+
+    @classmethod
+    def parse(cls, endpoint_identity: str) -> "ParsedEndpointIdentity":
+        """Parses canonical endpoint identities safely, handling origin colons and ports."""
+        if endpoint_identity.count(":") < 2:
+            raise ValueError(f"Invalid endpoint identity format: '{endpoint_identity}'")
+        try:
+            # Parse method and route from right to left
+            prefix, method, route = endpoint_identity.rsplit(":", 2)
+            if ":" in prefix:
+                asset_id, origin = prefix.split(":", 1)
+            else:
+                asset_id, origin = prefix, "canonical"
+
+            method = method.upper()
+            if method not in ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"):
+                raise ValueError(f"Invalid HTTP method in endpoint identity: '{method}'")
+            if not route.startswith("/"):
+                raise ValueError(f"Route template must start with '/': '{route}'")
+
+            return cls(
+                asset_id=asset_id,
+                origin=origin,
+                method=method,
+                route_template=route,
+            )
+        except Exception as e:
+            raise ValueError(f"Failed to parse endpoint identity '{endpoint_identity}': {e}") from e
+
+
 class CredentialBinding(BaseModel):
     """Opaque reference binding a tenant and role to a credential secret reference."""
     tenant_id: str = Field(..., min_length=1)
@@ -36,6 +78,7 @@ class CredentialBinding(BaseModel):
     @classmethod
     def validate_credential_reference(cls, v: str) -> str:
         """Ensures credential_ref is an opaque identifier and never a raw token or secret."""
+        # Check against raw token patterns
         raw_token_patterns = [
             r"^ey[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",  # JWT
             r"^(ghp_|gho_|sk-|secret_|password).*",                # Raw API keys / secrets
@@ -48,6 +91,13 @@ class CredentialBinding(BaseModel):
                 )
         if " " in v:
             raise ValueError("credential_ref cannot contain whitespace")
+
+        # Allowlist check for opaque reference formats
+        allowed_pattern = r"^([a-z0-9_-]+:[a-z0-9_\-:]+|mock_jwt_[a-z0-9_\-]+|ref:[a-z0-9_\-\.:]+)$"
+        if not re.match(allowed_pattern, v, re.IGNORECASE):
+            raise ValueError(
+                f"credential_ref '{v}' does not match allowed opaque reference format (e.g. cred:tenant:role, mock_jwt_*, ref:*)"
+            )
         return v
 
 
@@ -82,6 +132,23 @@ class NegativeControl(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class CanarySecretStore:
+    """Protected in-memory execution-time store for high-entropy canary secret values."""
+    _store: Dict[str, str] = {}
+
+    @classmethod
+    def store_secret(cls, secret_ref: str, value: str) -> None:
+        cls._store[secret_ref] = value
+
+    @classmethod
+    def get_secret(cls, secret_ref: str) -> Optional[str]:
+        return cls._store.get(secret_ref)
+
+    @classmethod
+    def clear(cls) -> None:
+        cls._store.clear()
+
+
 class CanarySpec(BaseModel):
     """Synthetic object and protected-value verification contract."""
     canary_id: str = Field(..., min_length=1)
@@ -89,7 +156,17 @@ class CanarySpec(BaseModel):
     object_type: str = Field(default="booking", min_length=1)
     canary_key: str = Field(default="passenger_name", min_length=1)
     canary_value_digest: str = Field(..., min_length=64, max_length=64)  # SHA-256
+    canary_secret_ref: str = Field(..., min_length=1)                    # Opaque secret reference
     mutation_allowed: bool = False
+
+    model_config = {"extra": "forbid"}
+
+
+class OutputBinding(BaseModel):
+    """Maps a field from a step's JSON response into the execution context."""
+    source_field: str = Field(..., min_length=1)
+    context_variable: str = Field(..., min_length=1)
+    default_value: Optional[str] = None
 
     model_config = {"extra": "forbid"}
 
@@ -110,13 +187,25 @@ class PlanStep(BaseModel):
     expected_status_baseline: Optional[int] = None
     requires_mutation_approval: bool = False
     is_critical: bool = True
+    output_bindings: List[OutputBinding] = Field(default_factory=list)
 
     model_config = {"extra": "forbid"}
+
+    @field_validator("headers")
+    @classmethod
+    def validate_headers_no_raw_auth(cls, headers: Dict[str, str]) -> Dict[str, str]:
+        """Prohibits raw authorization or session headers; authentication must be mediated."""
+        for k in headers:
+            if k.lower() in ("authorization", "cookie", "proxy-authorization", "x-api-key"):
+                raise ValueError(
+                    f"PlanStep.headers must not contain raw authentication header '{k}'. "
+                    f"Authentication must be mediated via credential references."
+                )
+        return headers
 
 
 # Alias for backwards and forwards compatibility
 AttackPlanStep = PlanStep
-
 
 
 class AttackPlan(BaseModel):
@@ -193,6 +282,20 @@ class AttackPlan(BaseModel):
                     f"bound credential '{expected_cred}' for tenant '{step.actor_tenant_id}'."
                 )
 
+        # 5. Negative control tenant & credential binding consistency
+        for ctrl in self.negative_controls:
+            if ctrl.actor_tenant_id not in allowed_credentials:
+                raise ValueError(
+                    f"Negative control '{ctrl.control_id}' references unknown actor tenant '{ctrl.actor_tenant_id}'. "
+                    f"Must be '{self.attacker_tenant_id}' or '{self.victim_tenant_id}'."
+                )
+            expected_cred = allowed_credentials[ctrl.actor_tenant_id]
+            if ctrl.credential_ref != expected_cred:
+                raise ValueError(
+                    f"Negative control '{ctrl.control_id}' credential_ref '{ctrl.credential_ref}' "
+                    f"does not match bound credential '{expected_cred}' for tenant '{ctrl.actor_tenant_id}'."
+                )
+
         return self
 
 
@@ -209,7 +312,7 @@ class AttackPlanCompiler:
         seed: Optional[str] = None,
         ttl_minutes: int = 60,
     ) -> AttackPlan:
-        """Compiles a fully validated, deterministic AttackPlan."""
+        """Compiles a fully validated AttackPlan with typed endpoint parsing and exact canary digests."""
         # Normalize hypothesis fields
         if isinstance(hypothesis, HypothesisNode):
             hyp_id = hypothesis.hypothesis_id
@@ -222,15 +325,38 @@ class AttackPlanCompiler:
             inv_type = hypothesis.invariant_targeted
             endpoint_id = (
                 hypothesis.target_endpoint.endpoint_id
-                if hypothesis.target_endpoint.endpoint_id.count(":") >= 3
+                if hypothesis.target_endpoint.endpoint_id.count(":") >= 2
                 else f"travel_api:canonical:{hypothesis.target_endpoint.method}:{hypothesis.target_endpoint.path_template}"
             )
             attacker_tenant = hypothesis.attacker_tenant_id
             victim_tenant = hypothesis.victim_tenant_id
 
-        # Stable, reproducible plan ID
-        seed_key = seed or "default"
-        plan_hash = hashlib.sha256(f"{hyp_id}:{endpoint_id}:{seed_key}".encode("utf-8")).hexdigest()[:12]
+        # Typed parsing of canonical endpoint identity (safely handles origins with colons and ports)
+        parsed_ep = ParsedEndpointIdentity.parse(endpoint_id)
+        route_template = parsed_ep.route_template
+        method = parsed_ep.method
+
+        # Generate exact canary token and digest
+        if inv_type == InvariantType.TENANT_ISOLATION:
+            if seed:
+                canary_token = hashlib.sha256(f"canary:{seed}:{hyp_id}".encode("utf-8")).hexdigest()[:16]
+            else:
+                canary_token = secrets.token_hex(16)
+            canary_value = f"CANARY_TOKEN_{canary_token}"
+            canary_digest = hashlib.sha256(canary_value.encode("utf-8")).hexdigest()
+        else:
+            canary_value = ""
+            canary_digest = ""
+
+        # Plan ID generation: deterministic when seed is provided, unique nonce when seed is None
+        if seed:
+            execution_key = f"seed:{seed}"
+        else:
+            execution_key = f"nonce:{secrets.token_hex(8)}"
+
+        plan_hash = hashlib.sha256(
+            f"{hyp_id}:{endpoint_id}:{execution_key}:{canary_digest}".encode("utf-8")
+        ).hexdigest()[:12]
         plan_id = f"PLAN-{plan_hash}"
 
         # Expiry timestamp
@@ -256,25 +382,20 @@ class AttackPlanCompiler:
             max_response_size_bytes=65536,
         )
 
-        # Parse route template from endpoint identity
-        parts = endpoint_id.split(":")
-        route_template = parts[3] if len(parts) >= 4 else "/api/v2/bookings/{booking_id}"
-        method = parts[2] if len(parts) >= 3 else "GET"
-
         if inv_type == InvariantType.TENANT_ISOLATION:
-            # Deterministic or high-entropy canary digest
-            if seed:
-                canary_secret = hashlib.sha256(f"canary:{plan_id}:{seed}".encode("utf-8")).hexdigest()[:16]
-            else:
-                canary_secret = secrets.token_hex(16)
-            canary_digest = hashlib.sha256(canary_secret.encode("utf-8")).hexdigest()
+            canary_id = f"canary_{plan_hash[:8]}"
+            canary_secret_ref = f"canary_secret:{canary_id}"
+
+            # Store exact plaintext value in protected execution-time store
+            CanarySecretStore.store_secret(canary_secret_ref, canary_value)
 
             canary_spec = CanarySpec(
-                canary_id=f"canary_{plan_hash[:8]}",
+                canary_id=canary_id,
                 owner_tenant_id=victim_tenant,
                 object_type="booking",
                 canary_key="passenger_name",
                 canary_value_digest=canary_digest,
+                canary_secret_ref=canary_secret_ref,
                 mutation_allowed=False,
             )
 
@@ -313,6 +434,7 @@ class AttackPlanCompiler:
             ]
 
             steps = [
+                # Step 1: SETUP - Agency A creates synthetic canary booking (captures victim_booking_id)
                 PlanStep(
                     step_id="step_1_create_victim_canary",
                     name="Provision Synthetic Canary Booking (Victim)",
@@ -322,13 +444,35 @@ class AttackPlanCompiler:
                     endpoint_route_template="/api/v2/bookings",
                     actor_tenant_id=victim_tenant,
                     credential_ref=victim_credential_ref,
-                    parameters={"passenger_name": f"Canary-{canary_secret[:8]}"},
-                    body={"passenger_name": f"Canary-{canary_secret[:8]}", "passenger_passport": "A1234567"},
+                    parameters={"passenger_name": canary_value},
+                    body={"passenger_name": canary_value, "metadata": {"canary_id": canary_id}},
                     expected_status_baseline=200,
                     is_critical=True,
+                    output_bindings=[
+                        OutputBinding(source_field="booking_id", context_variable="victim_booking_id")
+                    ],
                 ),
+                # Step 2: SETUP - Agency B provisions its own legitimate fixture booking (captures attacker_booking_id)
                 PlanStep(
-                    step_id="step_2_negative_control_victim_read",
+                    step_id="step_2_create_attacker_fixture",
+                    name="Provision Legitimate Fixture Booking (Attacker)",
+                    phase=PlanPhase.SETUP,
+                    method="POST",
+                    target_endpoint_identity="travel_api:canonical:POST:/api/v2/bookings",
+                    endpoint_route_template="/api/v2/bookings",
+                    actor_tenant_id=attacker_tenant,
+                    credential_ref=attacker_credential_ref,
+                    parameters={"passenger_name": "Legitimate Attacker Passenger"},
+                    body={"passenger_name": "Legitimate Attacker Passenger", "metadata": {"fixture": True}},
+                    expected_status_baseline=200,
+                    is_critical=True,
+                    output_bindings=[
+                        OutputBinding(source_field="booking_id", context_variable="attacker_booking_id")
+                    ],
+                ),
+                # Step 3: NEGATIVE_CONTROL - Agency A reads its own canary booking
+                PlanStep(
+                    step_id="step_3_negative_control_victim_read",
                     name="Verify Legitimate Access (Victim Negative Control)",
                     phase=PlanPhase.NEGATIVE_CONTROL,
                     method="GET",
@@ -336,12 +480,13 @@ class AttackPlanCompiler:
                     endpoint_route_template="/api/v2/bookings/{booking_id}",
                     actor_tenant_id=victim_tenant,
                     credential_ref=victim_credential_ref,
-                    parameters={"booking_id": "{canary_booking_id}"},
+                    parameters={"booking_id": "$victim_booking_id"},
                     expected_status_baseline=200,
                     is_critical=True,
                 ),
+                # Step 4: NEGATIVE_CONTROL - Agency B reads its own booking
                 PlanStep(
-                    step_id="step_3_negative_control_attacker_read",
+                    step_id="step_4_negative_control_attacker_read",
                     name="Verify Attacker Identity Health (Attacker Negative Control)",
                     phase=PlanPhase.NEGATIVE_CONTROL,
                     method="GET",
@@ -349,12 +494,13 @@ class AttackPlanCompiler:
                     endpoint_route_template="/api/v2/bookings/{booking_id}",
                     actor_tenant_id=attacker_tenant,
                     credential_ref=attacker_credential_ref,
-                    parameters={"booking_id": "{attacker_booking_id}"},
+                    parameters={"booking_id": "$attacker_booking_id"},
                     expected_status_baseline=200,
                     is_critical=True,
                 ),
+                # Step 5: PROBE - Agency B requests Agency A's booking
                 PlanStep(
-                    step_id="step_4_cross_tenant_probe",
+                    step_id="step_5_cross_tenant_probe",
                     name="Execute Cross-Tenant Read Probe",
                     phase=PlanPhase.PROBE,
                     method="GET",
@@ -362,7 +508,7 @@ class AttackPlanCompiler:
                     endpoint_route_template=route_template,
                     actor_tenant_id=attacker_tenant,
                     credential_ref=attacker_credential_ref,
-                    parameters={"booking_id": "{canary_booking_id}"},
+                    parameters={"booking_id": "$victim_booking_id"},
                     expected_status_baseline=403,
                     is_critical=True,
                 ),
@@ -426,6 +572,9 @@ class AttackPlanCompiler:
                     body={"quote_id": "QT_GOA_501"},
                     expected_status_baseline=200,
                     is_critical=True,
+                    output_bindings=[
+                        OutputBinding(source_field="hold_id", context_variable="acquired_hold_id")
+                    ],
                 ),
                 PlanStep(
                     step_id="step_2_negative_control_quote_verification",

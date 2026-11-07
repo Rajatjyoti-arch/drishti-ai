@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import time
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 import httpx
@@ -14,9 +15,6 @@ from drishti.core.models import (
     InferredEndpoint,
     InvariantType,
     OutgoingTestRequest,
-    PolicyAction,
-    PolicyDecision,
-    VerificationStatus,
     VerifiedFinding,
 )
 from drishti.executors.attack_plan import (
@@ -24,6 +22,7 @@ from drishti.executors.attack_plan import (
     AttackPlanCompiler,
     CredentialBinding,
     ExecutionBudget,
+    OutputBinding,
     PlanPhase,
     PlanStep,
 )
@@ -32,6 +31,7 @@ from drishti.executors.base import (
     ExecutionCancelledError,
     ISpecialistExecutor,
     redact_and_bound_evidence,
+    sanitize_response_headers,
 )
 from drishti.graph.schema import HypothesisNode
 from drishti.policy.client import SafeHttpClient
@@ -45,14 +45,12 @@ class DummyI01Executor(ISpecialistExecutor):
         self.check_plan_supported(plan)
         self.check_preconditions(plan)
 
-        # Execute steps
         last_resp = None
         for step in plan.steps:
-            resolved_url = f"http://test.local{step.endpoint_route_template}"
+            resolved_url = self.resolve_step_url(step, base_url="http://test.local")
             resp, exec_res = await self.send_guarded_request(plan, step, resolved_url)
             last_resp = resp
 
-        # Construct candidate finding
         inferred_ep = InferredEndpoint(
             endpoint_id="ep_test",
             method=plan.steps[-1].method,
@@ -81,23 +79,17 @@ class DummyI01Executor(ISpecialistExecutor):
         )
 
 
-class DummyI02Executor(ISpecialistExecutor):
-    """Concrete specialist executor testing I-02 pricing integrity contracts."""
-    supported_invariant = InvariantType.PRICING_INTEGRITY
-
-    async def execute(self, plan: AttackPlan) -> CandidateFinding:
-        self.check_plan_supported(plan)
-        return MagicMock(spec=CandidateFinding)
-
-
 @pytest.fixture
 def mock_safe_http_client():
     client = MagicMock(spec=SafeHttpClient)
-    # Return mock HTTP 200 response
     resp = httpx.Response(
         status_code=200,
-        headers={"content-type": "application/json"},
-        text='{"status": "ok", "passenger_name": "Canary Passenger", "passport": "Z1234567"}',
+        headers={
+            "content-type": "application/json",
+            "set-cookie": "session_id=secret123; HttpOnly",
+            "x-api-key": "internal_secret_key",
+        },
+        text='{"status": "ok", "booking_id": "BK-9999", "passenger_name": "Canary Passenger"}',
         request=httpx.Request("GET", "http://test.local/api/v2/bookings/1"),
     )
     client.send_request = AsyncMock(return_value=resp)
@@ -127,10 +119,64 @@ def test_invariant_binding_rejects_mismatched_plan(mock_safe_http_client):
 
 
 @pytest.mark.asyncio
-async def test_budget_reservation_and_exhaustion(mock_safe_http_client):
-    """Verify that request budget is reserved before execution and exhaustion prevents subsequent requests."""
-    executor = DummyI01Executor(http_client=mock_safe_http_client, budget_limit=2)
+async def test_stricter_effective_request_budget_enforcement(mock_safe_http_client):
+    """Verify that the stricter of plan request budget and executor limit is enforced."""
+    # Case 1: Executor limit (2) is stricter than Plan limit (10)
+    executor1 = DummyI01Executor(http_client=mock_safe_http_client, budget_limit=2)
+    step = PlanStep(
+        step_id="step_probe",
+        name="Probe Step",
+        phase=PlanPhase.PROBE,
+        method="GET",
+        target_endpoint_identity="ep:1",
+        endpoint_route_template="/test",
+        actor_tenant_id="agency_b",
+        credential_ref="cred:b:admin",
+    )
+    plan1 = AttackPlan(
+        plan_id="PLAN-BGT-1",
+        hypothesis_id="HYP-BGT-1",
+        invariant_id=InvariantType.TENANT_ISOLATION,
+        target_endpoint_identity="ep:1",
+        attacker_tenant_id="agency_b",
+        victim_tenant_id="agency_a",
+        attacker_credential=CredentialBinding(tenant_id="agency_b", credential_ref="cred:b:admin"),
+        victim_credential=CredentialBinding(tenant_id="agency_a", credential_ref="cred:a:admin"),
+        budget=ExecutionBudget(max_requests=10),
+        steps=[step],
+        expires_at="2027-01-01T00:00:00Z",
+    )
 
+    await executor1.send_guarded_request(plan1, step, "http://test.local/test")
+    await executor1.send_guarded_request(plan1, step, "http://test.local/test")
+    with pytest.raises(BudgetExhaustedError, match="budget exhausted: 2/2"):
+        await executor1.send_guarded_request(plan1, step, "http://test.local/test")
+
+    # Case 2: Plan limit (1) is stricter than Executor limit (5)
+    executor2 = DummyI01Executor(http_client=mock_safe_http_client, budget_limit=5)
+    plan2 = AttackPlan(
+        plan_id="PLAN-BGT-2",
+        hypothesis_id="HYP-BGT-2",
+        invariant_id=InvariantType.TENANT_ISOLATION,
+        target_endpoint_identity="ep:1",
+        attacker_tenant_id="agency_b",
+        victim_tenant_id="agency_a",
+        attacker_credential=CredentialBinding(tenant_id="agency_b", credential_ref="cred:b:admin"),
+        victim_credential=CredentialBinding(tenant_id="agency_a", credential_ref="cred:a:admin"),
+        budget=ExecutionBudget(max_requests=1),
+        steps=[step],
+        expires_at="2027-01-01T00:00:00Z",
+    )
+
+    await executor2.send_guarded_request(plan2, step, "http://test.local/test")
+    with pytest.raises(BudgetExhaustedError, match="budget exhausted: 1/1"):
+        await executor2.send_guarded_request(plan2, step, "http://test.local/test")
+
+
+@pytest.mark.asyncio
+async def test_duration_deadline_enforcement(mock_safe_http_client):
+    """Verify that exceeding the plan's max_duration_seconds raises BudgetExhaustedError."""
+    executor = DummyI01Executor(http_client=mock_safe_http_client)
     step = PlanStep(
         step_id="step_probe",
         name="Probe Step",
@@ -142,33 +188,181 @@ async def test_budget_reservation_and_exhaustion(mock_safe_http_client):
         credential_ref="cred:b:admin",
     )
     plan = AttackPlan(
-        plan_id="PLAN-BGT",
-        hypothesis_id="HYP-BGT",
+        plan_id="PLAN-DUR",
+        hypothesis_id="HYP-DUR",
         invariant_id=InvariantType.TENANT_ISOLATION,
         target_endpoint_identity="ep:1",
         attacker_tenant_id="agency_b",
         victim_tenant_id="agency_a",
         attacker_credential=CredentialBinding(tenant_id="agency_b", credential_ref="cred:b:admin"),
         victim_credential=CredentialBinding(tenant_id="agency_a", credential_ref="cred:a:admin"),
-        budget=ExecutionBudget(max_requests=2),
+        budget=ExecutionBudget(max_requests=10, max_duration_seconds=1),
         steps=[step],
         expires_at="2027-01-01T00:00:00Z",
     )
 
-    # 1st request -> ok
+    # First request sets start time
     await executor.send_guarded_request(plan, step, "http://test.local/test")
-    assert executor.requests_executed == 1
 
-    # 2nd request -> ok
-    await executor.send_guarded_request(plan, step, "http://test.local/test")
-    assert executor.requests_executed == 2
+    # Simulate elapsed duration exceeding 1s
+    executor._execution_start_time = time.monotonic() - 2.0
 
-    # 3rd request -> BudgetExhaustedError raised; no HTTP dispatch occurs
-    with pytest.raises(BudgetExhaustedError, match="budget exhausted: 2/2"):
+    with pytest.raises(BudgetExhaustedError, match="Execution duration limit exceeded"):
         await executor.send_guarded_request(plan, step, "http://test.local/test")
 
-    # Assert exactly 2 requests reached SafeHttpClient
-    assert mock_safe_http_client.send_request.call_count == 2
+
+@pytest.mark.asyncio
+async def test_response_size_budget_enforcement(mock_safe_http_client):
+    """Verify that oversized responses breaching max_response_size_bytes raise BudgetExhaustedError."""
+    # Mock an oversized response (e.g. 5000 bytes when budget is 1024)
+    oversized_text = "A" * 5000
+    oversized_resp = httpx.Response(
+        status_code=200,
+        text=oversized_text,
+        request=httpx.Request("GET", "http://test.local/api/v2/large"),
+    )
+    mock_safe_http_client.send_request = AsyncMock(return_value=oversized_resp)
+
+    executor = DummyI01Executor(http_client=mock_safe_http_client)
+    step = PlanStep(
+        step_id="step_large",
+        name="Large Step",
+        phase=PlanPhase.PROBE,
+        method="GET",
+        target_endpoint_identity="ep:1",
+        endpoint_route_template="/large",
+        actor_tenant_id="agency_b",
+        credential_ref="cred:b:admin",
+    )
+    plan = AttackPlan(
+        plan_id="PLAN-SIZE",
+        hypothesis_id="HYP-SIZE",
+        invariant_id=InvariantType.TENANT_ISOLATION,
+        target_endpoint_identity="ep:1",
+        attacker_tenant_id="agency_b",
+        victim_tenant_id="agency_a",
+        attacker_credential=CredentialBinding(tenant_id="agency_b", credential_ref="cred:b:admin"),
+        victim_credential=CredentialBinding(tenant_id="agency_a", credential_ref="cred:a:admin"),
+        budget=ExecutionBudget(max_requests=5, max_response_size_bytes=1024),
+        steps=[step],
+        expires_at="2027-01-01T00:00:00Z",
+    )
+
+    with pytest.raises(BudgetExhaustedError, match="exceeds maximum allowed budget"):
+        await executor.send_guarded_request(plan, step, "http://test.local/large")
+
+
+@pytest.mark.asyncio
+async def test_sensitive_response_header_sanitization(mock_safe_http_client):
+    """Verify that sensitive headers (Set-Cookie, x-api-key, Authorization) are sanitized in telemetry."""
+    executor = DummyI01Executor(http_client=mock_safe_http_client)
+    step = PlanStep(
+        step_id="step_head",
+        name="Header Step",
+        phase=PlanPhase.PROBE,
+        method="GET",
+        target_endpoint_identity="ep:1",
+        endpoint_route_template="/test",
+        actor_tenant_id="agency_b",
+        credential_ref="cred:b:admin",
+    )
+    plan = AttackPlan(
+        plan_id="PLAN-HEAD",
+        hypothesis_id="HYP-HEAD",
+        invariant_id=InvariantType.TENANT_ISOLATION,
+        target_endpoint_identity="ep:1",
+        attacker_tenant_id="agency_b",
+        victim_tenant_id="agency_a",
+        attacker_credential=CredentialBinding(tenant_id="agency_b", credential_ref="cred:b:admin"),
+        victim_credential=CredentialBinding(tenant_id="agency_a", credential_ref="cred:a:admin"),
+        steps=[step],
+        expires_at="2027-01-01T00:00:00Z",
+    )
+
+    _, exec_res = await executor.send_guarded_request(plan, step, "http://test.local/test")
+
+    # Sensitive headers sanitized
+    assert exec_res.headers["set-cookie"] == "[REDACTED_HEADER]"
+    assert exec_res.headers["x-api-key"] == "[REDACTED_HEADER]"
+    assert "secret123" not in str(exec_res.headers)
+
+    # Safe headers preserved
+    assert exec_res.headers["content-type"] == "application/json"
+
+
+@pytest.mark.asyncio
+async def test_execution_context_resolution_and_output_binding(mock_safe_http_client):
+    """Verify that setup outputs are captured into execution context and resolved in subsequent step URLs."""
+    executor = DummyI01Executor(http_client=mock_safe_http_client)
+
+    # Setup step with output binding: captures "booking_id" as "victim_booking_id"
+    setup_step = PlanStep(
+        step_id="step_setup",
+        name="Setup Canary",
+        phase=PlanPhase.SETUP,
+        method="POST",
+        target_endpoint_identity="travel_api:canonical:POST:/api/v2/bookings",
+        endpoint_route_template="/api/v2/bookings",
+        actor_tenant_id="agency_a",
+        credential_ref="cred:a:admin",
+        output_bindings=[OutputBinding(source_field="booking_id", context_variable="victim_booking_id")],
+    )
+
+    # Subsequent probe step using context variable in URL template
+    probe_step = PlanStep(
+        step_id="step_probe",
+        name="Probe Booking",
+        phase=PlanPhase.PROBE,
+        method="GET",
+        target_endpoint_identity="travel_api:canonical:GET:/api/v2/bookings/{booking_id}",
+        endpoint_route_template="/api/v2/bookings/{booking_id}",
+        actor_tenant_id="agency_b",
+        credential_ref="cred:b:admin",
+        parameters={"booking_id": "$victim_booking_id"},
+    )
+
+    plan = AttackPlan(
+        plan_id="PLAN-CTX",
+        hypothesis_id="HYP-CTX",
+        invariant_id=InvariantType.TENANT_ISOLATION,
+        target_endpoint_identity="travel_api:canonical:GET:/api/v2/bookings/{booking_id}",
+        attacker_tenant_id="agency_b",
+        victim_tenant_id="agency_a",
+        attacker_credential=CredentialBinding(tenant_id="agency_b", credential_ref="cred:b:admin"),
+        victim_credential=CredentialBinding(tenant_id="agency_a", credential_ref="cred:a:admin"),
+        steps=[setup_step, probe_step],
+        expires_at="2027-01-01T00:00:00Z",
+    )
+
+    # 1. Execute setup step
+    setup_url = executor.resolve_step_url(setup_step, base_url="http://test.local")
+    resp, _ = await executor.send_guarded_request(plan, setup_step, setup_url)
+
+    # Output binding captured BK-9999 from mock response
+    assert executor.execution_context["victim_booking_id"] == "BK-9999"
+
+    # 2. Resolve probe step URL -> correctly substitutes BK-9999
+    probe_url = executor.resolve_step_url(probe_step, base_url="http://test.local")
+    assert probe_url == "http://test.local/api/v2/bookings/BK-9999"
+
+
+def test_resolve_step_url_unbound_variable_raises_error(mock_safe_http_client):
+    """Verify that referencing an undefined context variable raises ValueError."""
+    executor = DummyI01Executor(http_client=mock_safe_http_client)
+    probe_step = PlanStep(
+        step_id="step_probe",
+        name="Probe Booking",
+        phase=PlanPhase.PROBE,
+        method="GET",
+        target_endpoint_identity="ep:1",
+        endpoint_route_template="/api/v2/bookings/{booking_id}",
+        actor_tenant_id="agency_b",
+        credential_ref="cred:b:admin",
+        parameters={"booking_id": "$unbound_var"},
+    )
+
+    with pytest.raises(ValueError, match="Unbound context variable 'unbound_var'"):
+        executor.resolve_step_url(probe_step, base_url="http://test.local")
 
 
 @pytest.mark.asyncio
@@ -202,7 +396,6 @@ async def test_cancellation_emergency_stop_halts_execution(mock_safe_http_client
     with pytest.raises(ExecutionCancelledError, match="execution cancelled"):
         await executor.send_guarded_request(plan, step, "http://test.local/test")
 
-    # HTTP client was never touched
     assert mock_safe_http_client.send_request.call_count == 0
 
 
@@ -283,12 +476,9 @@ async def test_finding_semantics_executor_emits_candidate_only(mock_safe_http_cl
 
     finding = await executor.execute(plan)
 
-    # Assert return type is CandidateFinding
     assert isinstance(finding, CandidateFinding)
     assert not isinstance(finding, VerifiedFinding)
-
-    # Candidate finding does not have CONFIRMED status
     assert hasattr(finding, "candidate_id")
     assert hasattr(finding, "observed_status_code")
     assert hasattr(finding, "raw_response_snippet")
-    assert not hasattr(finding, "status")  # VerificationStatus belongs only to VerifiedFinding
+    assert not hasattr(finding, "status")

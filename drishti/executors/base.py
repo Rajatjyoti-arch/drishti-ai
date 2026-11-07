@@ -2,17 +2,20 @@
 
 Enforces:
 1. Strict policy gate mediation for 100% of outbound test traffic (zero unmediated sockets).
-2. Per-test request budget tracking with atomic reservation and hard execution ceilings.
+2. Per-test request budget tracking with atomic reservation, duration deadlines, and hard ceilings.
 3. Cooperative cancellation and emergency stop handling.
-4. Bounded, redacted evidence collection and SHA-256 payload digest tracking.
-5. Strict candidate-only finding semantics (executors cannot emit CONFIRMED findings).
+4. Bounded, redacted evidence collection, response header sanitization, and SHA-256 payload digests.
+5. Typed execution context and response output binding.
+6. Strict candidate-only finding semantics (executors cannot emit CONFIRMED findings).
 """
 
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 import hashlib
+import json
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 import uuid
 
@@ -33,15 +36,36 @@ from drishti.policy.client import SafeHttpClient
 
 logger = logging.getLogger(__name__)
 
+SENSITIVE_HEADER_KEYS = {
+    "authorization",
+    "set-cookie",
+    "cookie",
+    "x-api-key",
+    "proxy-authorization",
+    "www-authenticate",
+    "x-auth-token",
+}
+
 
 class BudgetExhaustedError(Exception):
-    """Raised when an executor breaches its configured request budget limit."""
+    """Raised when an executor breaches its configured request count, duration, or payload budget."""
     pass
 
 
 class ExecutionCancelledError(Exception):
     """Raised when an active security execution is terminated by emergency stop."""
     pass
+
+
+def sanitize_response_headers(headers: httpx.Headers) -> Dict[str, str]:
+    """Sanitizes sensitive authentication headers and cookies in execution telemetry."""
+    sanitized: Dict[str, str] = {}
+    for k, v in headers.items():
+        if k.lower() in SENSITIVE_HEADER_KEYS:
+            sanitized[k] = "[REDACTED_HEADER]"
+        else:
+            sanitized[k] = v
+    return sanitized
 
 
 def redact_and_bound_evidence(
@@ -91,7 +115,9 @@ class ISpecialistExecutor(ABC):
         self.requests_executed: int = 0
         self.is_cancelled: bool = False
         self._cancel_reason: str = ""
+        self._execution_start_time: Optional[float] = None
         self.execution_history: List[ExecutionResult] = []
+        self.execution_context: Dict[str, Any] = {}
 
     def cancel(self, reason: str = "Emergency stop signal received") -> None:
         """Triggers immediate cancellation and halts all further outbound probes."""
@@ -104,7 +130,9 @@ class ISpecialistExecutor(ABC):
         self.requests_executed = 0
         self.is_cancelled = False
         self._cancel_reason = ""
+        self._execution_start_time = None
         self.execution_history.clear()
+        self.execution_context.clear()
 
     def check_plan_supported(self, plan: AttackPlan) -> None:
         """Verifies that the attack plan matches the executor's supported invariant."""
@@ -123,6 +151,42 @@ class ISpecialistExecutor(ABC):
                 f"Attack plan '{plan.plan_id}' expired at {plan.expires_at} (current time {now.isoformat()})."
             )
 
+    def resolve_step_url(self, step: AttackPlanStep, base_url: str = "") -> str:
+        """Resolves route template parameters using step parameters and typed execution context."""
+        url = f"{base_url.rstrip('/')}{step.endpoint_route_template}"
+        for param_key, param_val in step.parameters.items():
+            if isinstance(param_val, str) and param_val.startswith("$"):
+                var_name = param_val[1:]
+                if var_name not in self.execution_context:
+                    raise ValueError(
+                        f"Unbound context variable '{var_name}' required for step '{step.step_id}'."
+                    )
+                resolved_val = str(self.execution_context[var_name])
+            else:
+                resolved_val = str(param_val)
+
+            # Substitute in URL path template {param_key}
+            placeholder = f"{{{param_key}}}"
+            if placeholder in url:
+                url = url.replace(placeholder, resolved_val)
+
+        return url
+
+    def capture_step_outputs(self, step: AttackPlanStep, response: httpx.Response) -> None:
+        """Extracts declared output bindings from JSON response into typed execution context."""
+        if not step.output_bindings:
+            return
+
+        try:
+            json_data = response.json()
+            if isinstance(json_data, dict):
+                for binding in step.output_bindings:
+                    val = json_data.get(binding.source_field, binding.default_value)
+                    if val is not None:
+                        self.execution_context[binding.context_variable] = str(val)
+        except Exception as e:
+            logger.debug(f"Failed to extract JSON output bindings for step '{step.step_id}': {e}")
+
     async def send_guarded_request(
         self,
         plan: AttackPlan,
@@ -134,7 +198,7 @@ class ISpecialistExecutor(ABC):
         """Mediates an HTTP test request through the SafeHttpClient and PolicyGate.
 
         Enforces atomic budget reservation, cooperative cancellation checks,
-        evidence redaction, and strict zero-fallback policy denial behavior.
+        duration limits, evidence redaction, and strict zero-fallback policy denial behavior.
         """
         # Pre-dispatch cancellation check
         if self.is_cancelled:
@@ -142,11 +206,25 @@ class ISpecialistExecutor(ABC):
                 f"Cannot dispatch step '{step.step_id}'; execution cancelled ({self._cancel_reason})."
             )
 
-        # Atomic budget reservation
-        max_allowed = self.budget_limit if self.budget_limit is not None else plan.budget.max_requests
-        if self.requests_executed >= max_allowed:
+        # Enforce execution duration deadline
+        now_mono = time.monotonic()
+        if self._execution_start_time is None:
+            self._execution_start_time = now_mono
+        else:
+            elapsed = now_mono - self._execution_start_time
+            if elapsed > plan.budget.max_duration_seconds:
+                raise BudgetExhaustedError(
+                    f"Execution duration limit exceeded: {elapsed:.2f}s > {plan.budget.max_duration_seconds}s limit."
+                )
+
+        # Atomic budget reservation (taking the stricter of plan and executor limit)
+        effective_limit = min(
+            plan.budget.max_requests,
+            self.budget_limit if self.budget_limit is not None else plan.budget.max_requests,
+        )
+        if self.requests_executed >= effective_limit:
             raise BudgetExhaustedError(
-                f"Executor request budget exhausted: {self.requests_executed}/{max_allowed} requests used."
+                f"Executor request budget exhausted: {self.requests_executed}/{effective_limit} requests used."
             )
 
         # Reserve budget slot atomically before network call
@@ -178,10 +256,24 @@ class ISpecialistExecutor(ABC):
                 f"Execution cancelled during/after step '{step.step_id}' ({self._cancel_reason})."
             )
 
+        # Enforce response payload size limit
+        content_size = len(response.content) if hasattr(response, "content") else len((response.text or "").encode("utf-8"))
+        if content_size > plan.budget.max_response_size_bytes:
+            raise BudgetExhaustedError(
+                f"Response size {content_size} bytes exceeds maximum allowed budget of {plan.budget.max_response_size_bytes} bytes."
+            )
+
+        # Capture declared outputs into execution context
+        self.capture_step_outputs(step, response)
+
+        # Redact and bound evidence body
         sanitized_snippet, raw_digest = redact_and_bound_evidence(
             response.text or "",
             max_length=min(plan.budget.max_response_size_bytes, 1000),
         )
+
+        # Sanitize sensitive headers in telemetry
+        sanitized_headers = sanitize_response_headers(response.headers)
 
         try:
             latency_ms = int(response.elapsed.total_seconds() * 1000)
@@ -191,7 +283,7 @@ class ISpecialistExecutor(ABC):
         exec_res = ExecutionResult(
             request_id=req_id,
             status_code=response.status_code,
-            headers=dict(response.headers),
+            headers=sanitized_headers,
             sanitized_body=sanitized_snippet,
             latency_ms=latency_ms,
             response_digest=raw_digest,
