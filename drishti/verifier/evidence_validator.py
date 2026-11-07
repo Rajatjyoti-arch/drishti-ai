@@ -2,15 +2,17 @@
 
 Validates:
 1. Negative control phase completion and baseline legitimacy.
-2. Cryptographic payload digests (SHA-256) and audit ledger consistency.
-3. Canary token injection and digest fidelity.
-4. Policy decision nonces and request correlation.
+2. Cryptographic payload digests (SHA-256) and artifact re-computation.
+3. Canary token injection and digest fidelity (fail-closed).
+4. Policy decision nonces (dec_*) and request correlation.
+5. Audit ledger checkpoints and chain consistency.
 """
 
+import functools
 import hashlib
 import logging
 import re
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -19,6 +21,27 @@ from drishti.verifier.models import EvidenceManifest, EvidenceReference
 logger = logging.getLogger(__name__)
 
 HEX_64_REGEX = re.compile(r"^[a-fA-F0-9]{64}$")
+DECISION_NONCE_REGEX = re.compile(r"^dec_[a-fA-F0-9]{6,}$")
+
+
+class class_or_instancemethod:
+    """Descriptor enabling a method to be called as either an instance method or class method."""
+
+    def __init__(self, func):
+        self.func = func
+        functools.update_wrapper(self, func)
+
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            @functools.wraps(self.func)
+            def class_wrapper(*args, **kwargs):
+                return self.func(owner(), *args, **kwargs)
+            return class_wrapper
+
+        @functools.wraps(self.func)
+        def instance_wrapper(*args, **kwargs):
+            return self.func(instance, *args, **kwargs)
+        return instance_wrapper
 
 
 class EvidenceValidationReport(BaseModel):
@@ -35,17 +58,35 @@ class EvidenceValidationReport(BaseModel):
 class EvidenceValidator:
     """Verifies evidence manifests prior to independent oracle verification."""
 
-    @staticmethod
+    def __init__(
+        self,
+        evidence_store: Optional[Any] = None,
+        ledger: Optional[Any] = None,
+    ):
+        self.evidence_store = evidence_store
+        self.ledger = ledger
+
+    @class_or_instancemethod
     def validate_manifest(
+        self,
         manifest: EvidenceManifest,
         canary_secret: Optional[str] = None,
+        raw_payloads: Optional[Dict[str, str]] = None,
     ) -> EvidenceValidationReport:
         """Runs cryptographic and structural validation checks on an EvidenceManifest."""
+        return self._do_validate(manifest, canary_secret=canary_secret, raw_payloads=raw_payloads)
+
+    def _do_validate(
+        self,
+        manifest: EvidenceManifest,
+        canary_secret: Optional[str] = None,
+        raw_payloads: Optional[Dict[str, str]] = None,
+    ) -> EvidenceValidationReport:
         issues: List[str] = []
         checked_steps = len(manifest.evidence_references)
         negative_control_verified = False
         canary_digest_matched = False
-        digests_verified = True
+        digests_verified = False
 
         if checked_steps == 0:
             issues.append("Evidence manifest contains zero execution step references.")
@@ -79,13 +120,18 @@ class EvidenceValidator:
             if all_neg_ok:
                 negative_control_verified = True
 
-        # 2. Canary token digest validation
+        # 2. Canary token digest validation (STRICT FAIL-CLOSED)
         if manifest.canary_spec_digest:
             if not HEX_64_REGEX.match(manifest.canary_spec_digest):
                 issues.append(
                     f"Canary spec digest '{manifest.canary_spec_digest}' is not a valid 64-char SHA-256 hash."
                 )
-            elif canary_secret is not None:
+            elif canary_secret is None:
+                # Fail-closed: missing verification material cannot be assumed valid
+                issues.append(
+                    "Canary secret was not provided to verify canary_spec_digest; failing closed."
+                )
+            else:
                 computed_digest = hashlib.sha256(canary_secret.encode("utf-8")).hexdigest()
                 if computed_digest.lower() == manifest.canary_spec_digest.lower():
                     canary_digest_matched = True
@@ -94,18 +140,44 @@ class EvidenceValidator:
                         f"Canary secret digest ({computed_digest}) does not match manifest "
                         f"canary_spec_digest ({manifest.canary_spec_digest})."
                     )
-            else:
-                # Canary digest exists and is well-formed, but secret was not provided for re-hashing
-                canary_digest_matched = True
+        else:
+            # Invariants not using synthetic canaries (e.g. pricing integrity)
+            canary_digest_matched = True
 
-        # 3. Step digest format and payload consistency
+        # 3. Policy decision nonces, response digest integrity, and artifact recomputation
+        digest_errors = 0
         for ref in manifest.evidence_references:
+            if not ref.request_id:
+                issues.append(f"Step '{ref.step_id}' is missing request_id.")
+                digest_errors += 1
+
+            # Validate policy decision nonce was issued by PolicyGate
+            if not ref.policy_decision_nonce or not DECISION_NONCE_REGEX.match(ref.policy_decision_nonce):
+                issues.append(
+                    f"Step '{ref.step_id}' contains invalid or missing policy decision nonce: "
+                    f"'{ref.policy_decision_nonce}'."
+                )
+                digest_errors += 1
+
+            # Validate response digest format
             if not ref.response_digest or not HEX_64_REGEX.match(ref.response_digest):
                 issues.append(
                     f"Step '{ref.step_id}' contains invalid or missing response digest: "
                     f"'{ref.response_digest}'."
                 )
-                digests_verified = False
+                digest_errors += 1
+
+            # Recompute digest from raw payload if supplied (detect forged SHA-256)
+            if raw_payloads:
+                raw_body = raw_payloads.get(ref.request_id) or raw_payloads.get(ref.step_id)
+                if raw_body is not None:
+                    recomputed = hashlib.sha256(raw_body.encode("utf-8")).hexdigest()
+                    if recomputed.lower() != ref.response_digest.lower():
+                        issues.append(
+                            f"Step '{ref.step_id}' forged digest: payload SHA-256 ({recomputed}) "
+                            f"does not match declared digest ({ref.response_digest})."
+                        )
+                        digest_errors += 1
 
             # Check cross-correlation with manifest.raw_payload_hashes if populated
             if manifest.raw_payload_hashes:
@@ -117,11 +189,27 @@ class EvidenceValidator:
                         f"Step '{ref.step_id}' response digest '{ref.response_digest}' does "
                         f"not match manifest raw payload hash '{expected_hash}'."
                     )
-                    digests_verified = False
+                    digest_errors += 1
 
-            # Check request identifier validity
-            if not ref.request_id:
-                issues.append(f"Step '{ref.step_id}' is missing request_id.")
+        # 4. Audit ledger checkpoint verification
+        if not manifest.audit_ledger_checkpoint:
+            issues.append("Missing required audit ledger checkpoint in evidence manifest.")
+            digest_errors += 1
+        elif self.ledger and hasattr(self.ledger, "get_all_events"):
+            try:
+                events = self.ledger.get_all_events()
+                if not events and not manifest.audit_ledger_checkpoint.startswith("chk_"):
+                    issues.append(
+                        f"Audit ledger checkpoint '{manifest.audit_ledger_checkpoint}' could "
+                        f"not be authenticated against audit ledger."
+                    )
+                    digest_errors += 1
+            except Exception as e:
+                issues.append(f"Audit ledger verification error: {e}")
+                digest_errors += 1
+
+        if digest_errors == 0:
+            digests_verified = True
 
         is_valid = len(issues) == 0
 

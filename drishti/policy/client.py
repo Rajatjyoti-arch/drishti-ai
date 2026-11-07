@@ -155,9 +155,11 @@ class SafeHttpClient:
                         chunks.append(chunk)
 
                     body_bytes = b"".join(chunks)
+                    resp_headers = dict(stream_resp.headers)
+                    resp_headers["x-drishti-decision-nonce"] = decision.decision_id
                     response = httpx.Response(
                         status_code=stream_resp.status_code,
-                        headers=stream_resp.headers,
+                        headers=resp_headers,
                         content=body_bytes,
                         request=stream_resp.request,
                     )

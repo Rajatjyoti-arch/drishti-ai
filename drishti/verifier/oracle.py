@@ -3,8 +3,8 @@
 Strict separation of concerns:
 - Specialist executors propose CandidateFindings.
 - The Verification Oracle independently verifies them via:
-  1. Cryptographic and structural manifest validation.
-  2. Independent read-back verification against the target service.
+  1. Cryptographic and structural manifest validation (fail-closed).
+  2. Independent out-of-band API read-back verification against the target service.
   3. Transparent, rubric-based engineering confidence calculation.
   4. 3-way classification: CONFIRMED, NOT_REPRODUCED, INCONCLUSIVE.
   5. Generating production-ready VerifiedFinding contracts with remediation guidance.
@@ -25,6 +25,7 @@ from drishti.core.models import (
     VerificationStatus,
     VerifiedFinding,
 )
+from drishti.executors.attack_plan import CanarySecretStore
 from drishti.policy.client import SafeHttpClient
 from drishti.verifier.evidence_validator import EvidenceValidationReport, EvidenceValidator
 from drishti.verifier.models import (
@@ -54,26 +55,91 @@ class VerificationOracle:
         run_result: ExecutorRunResult,
         base_url: str = "http://test",
         canary_secret: Optional[str] = None,
+        raw_payloads: Optional[Dict[str, str]] = None,
     ) -> VerificationResult:
         """Independently evaluates and verifies an executor's execution result.
 
         Enforces a strict 3-way classification:
-        - CONFIRMED: Cryptographic evidence valid + independent read-back matched.
+        - CONFIRMED: Cryptographic evidence valid + independent API read-back matched.
         - NOT_REPRODUCED: Target application defenses held (e.g. 403/400).
-        - INCONCLUSIVE: Broken negative control, expired baseline, or failed read-back.
+        - INCONCLUSIVE: Broken negative control, expired baseline, manifest flaws, or failed read-back.
         """
         candidate = run_result.candidate
+        effective_canary_secret = canary_secret
+        if not effective_canary_secret and run_result.evidence_manifest.canary_spec_digest:
+            effective_canary_secret = CanarySecretStore.get_secret_by_digest(
+                run_result.evidence_manifest.canary_spec_digest
+            )
 
-        # 1. Non-candidate execution outcomes
+        # 1. Non-candidate execution outcomes: validate evidence before accepting defense claims
         if run_result.outcome == ExecutionOutcome.EXPECTED_REJECTION:
+            # P0: Validate manifest BEFORE accepting expected rejection
+            validation_report = self.evidence_validator.validate_manifest(
+                manifest=run_result.evidence_manifest,
+                canary_secret=effective_canary_secret,
+                raw_payloads=raw_payloads,
+            )
+
+            if not validation_report.is_valid:
+                rationale = (
+                    f"Evidence manifest validation failed on expected rejection: "
+                    f"{'; '.join(validation_report.issues)}. Defensive assertion cannot be confirmed."
+                )
+                attempt = VerificationAttempt(
+                    status=VerificationStatus.INCONCLUSIVE,
+                    confidence_score=0.30,
+                    confidence_rationale=f"0.30: Evidence anomalies present on rejected run: {'; '.join(validation_report.issues)}",
+                    read_back_performed=False,
+                    read_back_matched=False,
+                    evidence_validation_passed=False,
+                    details={"issues": validation_report.issues},
+                )
+                return VerificationResult(
+                    candidate_id=candidate.candidate_id if candidate else "none",
+                    invariant_id=run_result.invariant_id,
+                    status=VerificationStatus.INCONCLUSIVE,
+                    confidence_score=0.30,
+                    confidence_rationale=rationale,
+                    evidence_manifest_id=run_result.evidence_manifest.manifest_id,
+                    attempts=[attempt],
+                    verified_finding=None,
+                    recommended_action="Audit execution telemetry and fix evidence integrity before accepting clean defense status.",
+                )
+
+            # Check if rejection was caused by Guard / Policy Gate denial rather than target application
+            reason_lower = (run_result.reason or "").lower()
+            if any(term in reason_lower for term in ["policy gate", "drishti-guard", "budget exhausted", "denied by policy"]):
+                rationale = f"Probe was rejected by Policy Gate / Guard before reaching target ({run_result.reason}). Target defense unverified."
+                attempt = VerificationAttempt(
+                    status=VerificationStatus.INCONCLUSIVE,
+                    confidence_score=0.0,
+                    confidence_rationale="0.00: Guard-level denial halted execution before target evaluation.",
+                    read_back_performed=False,
+                    read_back_matched=False,
+                    evidence_validation_passed=True,
+                    details={"reason": run_result.reason},
+                )
+                return VerificationResult(
+                    candidate_id=candidate.candidate_id if candidate else "none",
+                    invariant_id=run_result.invariant_id,
+                    status=VerificationStatus.INCONCLUSIVE,
+                    confidence_score=0.0,
+                    confidence_rationale=rationale,
+                    evidence_manifest_id=run_result.evidence_manifest.manifest_id,
+                    attempts=[attempt],
+                    verified_finding=None,
+                    recommended_action="Check policy gate configuration and test budgets.",
+                )
+
+            # Target application properly enforced invariant rules
             rationale = (
-                f"Target application defensive controls held. Probe was properly rejected "
+                f"Target application defensive controls held. Probe was properly rejected by the application "
                 f"({run_result.reason or 'expected authorization or input validation rejection'})."
             )
             attempt = VerificationAttempt(
                 status=VerificationStatus.NOT_REPRODUCED,
                 confidence_score=1.0,
-                confidence_rationale="1.00: Defensive controls held cleanly; invariant maintained.",
+                confidence_rationale="1.00: Defensive controls held cleanly; invariant maintained and verified.",
                 read_back_performed=False,
                 read_back_matched=False,
                 evidence_validation_passed=True,
@@ -117,7 +183,7 @@ class VerificationOracle:
                 recommended_action="Investigate target environment stability and rerun verification.",
             )
 
-        # 2. Candidate evaluation: validate evidence manifest
+        # 2. Candidate evaluation: validate evidence manifest (fail-closed)
         if not candidate:
             return VerificationResult(
                 candidate_id="none",
@@ -133,7 +199,8 @@ class VerificationOracle:
 
         validation_report = self.evidence_validator.validate_manifest(
             manifest=run_result.evidence_manifest,
-            canary_secret=canary_secret,
+            canary_secret=effective_canary_secret,
+            raw_payloads=raw_payloads,
         )
 
         if not validation_report.is_valid:
@@ -165,7 +232,7 @@ class VerificationOracle:
                 recommended_action="Audit execution logs and cryptographic digests before trusting finding.",
             )
 
-        # 3. Independent Read-Back Verification
+        # 3. Independent API Read-Back Verification
         read_back_performed = False
         read_back_status: Optional[int] = None
         read_back_matched = False
@@ -181,10 +248,10 @@ class VerificationOracle:
                 ) = await self._perform_independent_read_back(
                     run_result=run_result,
                     base_url=base_url,
-                    canary_secret=canary_secret,
+                    canary_secret=effective_canary_secret,
                 )
             except Exception as e:
-                logger.error(f"Independent read-back verification threw exception: {e}")
+                logger.error(f"Independent API read-back verification threw exception: {e}")
                 read_back_details["error"] = str(e)
 
         # 4. Transparent Engineering Confidence Rubric
@@ -220,7 +287,7 @@ class VerificationOracle:
             )
             recommended_action = self._determine_recommended_action(run_result.invariant_id)
         else:
-            recommended_action = "Target state unverified by independent read-back. Retest required."
+            recommended_action = "Target state unverified by independent API read-back. Retest required."
 
         return VerificationResult(
             candidate_id=candidate.candidate_id,
@@ -240,41 +307,70 @@ class VerificationOracle:
         base_url: str,
         canary_secret: Optional[str],
     ) -> tuple[int, bool, Dict[str, Any]]:
-        """Executes an out-of-band read request against the target datastore to confirm persistence."""
+        """Executes an out-of-band read request against the target service API to confirm persistence."""
         res_id = run_result.persisted_resource_id
         details: Dict[str, Any] = {"resource_id": res_id}
 
+        # Dynamically derive attacker credentials and tenant from execution context
+        attacker_tenant = (
+            run_result.candidate.hypothesis.attacker_tenant_id
+            if run_result.candidate
+            else "agency_b"
+        )
+        cred_ref = (
+            run_result.candidate.hypothesis.target_endpoint.parameters.get("credential_ref")
+            if run_result.candidate
+            else None
+        ) or f"cred:{attacker_tenant.lower()}:admin"
+
         if run_result.invariant_id == InvariantType.TENANT_ISOLATION:
-            # Independent read-back for BOLA: attacker reading victim booking
+            # Independent API read-back for BOLA: attacker reading victim booking
             req = OutgoingTestRequest(
                 method="GET",
                 url=f"{base_url.rstrip('/')}/api/v2/bookings/{res_id}",
-                target_tenant_id=run_result.candidate.hypothesis.attacker_tenant_id,
+                target_tenant_id=attacker_tenant,
                 target_invariant=run_result.invariant_id,
-                credential_ref="cred:agency_b:admin",
+                credential_ref=cred_ref,
                 test_id="oracle_readback_i01",
             )
             resp = await self.http_client.send_request(req)
             details["status_code"] = resp.status_code
             if resp.status_code == 200:
-                body = resp.text
-                has_canary = (
-                    canary_secret in body
-                    if canary_secret
-                    else "canary" in body.lower()
-                )
+                # STRICT FAIL-CLOSED CANARY CHECK:
+                # Reject generic "canary" substring matches. Must verify exact secret or token field.
+                if not canary_secret:
+                    details["canary_verification_error"] = "Canary secret not supplied for independent verification"
+                    return resp.status_code, False, details
+
+                has_canary = False
+                try:
+                    data = resp.json()
+                    observed_token = (
+                        data.get("canary_token")
+                        or data.get("canary_value")
+                        or data.get("canary_id")
+                    )
+                    if observed_token and str(observed_token) == str(canary_secret):
+                        has_canary = True
+                    elif canary_secret in resp.text:
+                        # Exact secret string presence
+                        has_canary = True
+                except Exception:
+                    if canary_secret in resp.text:
+                        has_canary = True
+
                 details["canary_observed"] = has_canary
                 return resp.status_code, has_canary, details
             return resp.status_code, False, details
 
         elif run_result.invariant_id == InvariantType.PRICING_INTEGRITY:
-            # Independent read-back for Pricing: verify persisted booking amount in DB
+            # Independent API read-back for Pricing: verify persisted booking amount in backend
             req = OutgoingTestRequest(
                 method="GET",
                 url=f"{base_url.rstrip('/')}/api/v2/bookings/{res_id}",
-                target_tenant_id=run_result.candidate.hypothesis.attacker_tenant_id,
+                target_tenant_id=attacker_tenant,
                 target_invariant=run_result.invariant_id,
-                credential_ref="cred:agency_b:admin",
+                credential_ref=cred_ref,
                 test_id="oracle_readback_i02",
             )
             resp = await self.http_client.send_request(req)
@@ -282,17 +378,32 @@ class VerificationOracle:
             if resp.status_code == 200:
                 try:
                     data = resp.json()
-                    details["persisted_amount"] = data.get("amount_minor_units")
-                    details["persisted_currency"] = data.get("currency")
+                    persisted_amount = data.get("amount_minor_units")
+                    persisted_currency = data.get("currency")
+                    details["persisted_amount"] = persisted_amount
+                    details["persisted_currency"] = persisted_currency
+
                     probe_summary = run_result.probe_summary or {}
+                    baseline_summary = run_result.baseline_summary or {}
                     tampered_amount = probe_summary.get("tampered_amount")
                     tampered_currency = probe_summary.get("tampered_currency")
+                    authoritative_amount = baseline_summary.get("amount_minor_units")
+                    authoritative_currency = baseline_summary.get("currency")
 
+                    # P1 FIX: Variant-specific comparison (AND instead of OR)
                     matched = False
-                    if tampered_amount is not None and data.get("amount_minor_units") == tampered_amount:
-                        matched = True
-                    if tampered_currency is not None and data.get("currency") == tampered_currency:
-                        matched = True
+                    if tampered_amount is not None and tampered_currency is None:
+                        # Amount tampering: amount MUST match tampered value AND currency MUST match quote baseline
+                        matched = (persisted_amount == tampered_amount) and (
+                            authoritative_currency is None or persisted_currency == authoritative_currency
+                        )
+                    elif tampered_currency is not None and tampered_amount is None:
+                        # Currency tampering: currency MUST match tampered value AND amount MUST match quote baseline
+                        matched = (persisted_currency == tampered_currency) and (
+                            authoritative_amount is None or persisted_amount == authoritative_amount
+                        )
+                    elif tampered_amount is not None and tampered_currency is not None:
+                        matched = (persisted_amount == tampered_amount) and (persisted_currency == tampered_currency)
 
                     details["persisted_tampering_matched"] = matched
                     return resp.status_code, matched, details
@@ -316,7 +427,7 @@ class VerificationOracle:
         +0.25: Baseline negative controls executed and verified.
         +0.15: Authoritative quote / canary spec integrity verified.
         +0.30: Specialist probe produced 200 OK with violation characteristics.
-        +0.20: Independent oracle read-back confirmed persistent violation in datastore.
+        +0.20: Independent oracle API read-back confirmed persistent violation.
         +0.10: Tamper-evident evidence digests and payload hashes verified.
         """
         score = 0.0
@@ -342,9 +453,9 @@ class VerificationOracle:
 
         if read_back_performed and read_back_matched:
             score += 0.20
-            rationale.append("+0.20: Independent read-back confirmed datastore persistence")
+            rationale.append("+0.20: Independent API read-back confirmed datastore persistence")
         else:
-            rationale.append("+0.00: Independent read-back unconfirmed")
+            rationale.append("+0.00: Independent API read-back unconfirmed")
 
         if validation_report.digests_verified:
             score += 0.10

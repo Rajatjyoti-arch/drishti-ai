@@ -361,12 +361,18 @@ class ISpecialistExecutor(ABC):
         except Exception:
             latency_ms = 0
 
+        decision_nonce = (
+            response.headers.get("x-drishti-decision-nonce")
+            or f"dec_{uuid.uuid4().hex[:12]}"
+        )
+
         exec_res = ExecutionResult(
             request_id=req_id,
             status_code=response.status_code,
             headers=sanitized_headers,
             sanitized_body=sanitized_snippet,
             latency_ms=latency_ms,
+            policy_decision_nonce=decision_nonce,
             response_digest=raw_digest,
         )
         self.execution_history.append(exec_res)
@@ -385,7 +391,7 @@ class ISpecialistExecutor(ABC):
             url=resolved_url,
             status_code=response.status_code,
             response_digest=raw_digest,
-            policy_decision_nonce=exec_res.policy_decision_nonce or "",
+            policy_decision_nonce=decision_nonce,
             latency_ms=latency_ms,
             captured_bindings=step_bindings,
         )
@@ -408,12 +414,26 @@ class ISpecialistExecutor(ABC):
             ref.step_id: ref.response_digest
             for ref in self.evidence_references
         }
+        checkpoint_id = None
+        if hasattr(self.http_client, "policy_gate") and hasattr(self.http_client.policy_gate, "ledger"):
+            ledger = getattr(self.http_client.policy_gate, "ledger", None)
+            if ledger and hasattr(ledger, "get_all_events"):
+                try:
+                    events = ledger.get_all_events()
+                    if events:
+                        checkpoint_id = f"chk_{events[-1].current_hash[:16]}"
+                except Exception:
+                    pass
+        if not checkpoint_id:
+            checkpoint_id = f"chk_{hashlib.sha256(execution_id.encode('utf-8')).hexdigest()[:16]}"
+
         return EvidenceManifest(
             plan_id=plan.plan_id,
             execution_id=execution_id,
             invariant_id=plan.invariant_id,
             evidence_references=list(self.evidence_references),
             raw_payload_hashes=raw_payload_hashes,
+            audit_ledger_checkpoint=checkpoint_id,
             canary_spec_digest=canary_digest,
         )
 

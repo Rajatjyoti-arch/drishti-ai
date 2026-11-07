@@ -11,7 +11,7 @@
 [![Framework](https://img.shields.io/badge/Rust%20API-Axum-7C3AED)](https://github.com/tokio-rs/axum)
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Track](https://img.shields.io/badge/VOYAGEHACK%204.0-Fraud%20Prevention%20%26%20Security-ef8c35)](https://unstop.com/)
-[![Tests](https://img.shields.io/badge/Reported%20tests-239%20passing-2ea44f)](#verification-status)
+[![Tests](https://img.shields.io/badge/Reported%20tests-252%20passing-2ea44f)](#verification-status)
 
 *An application is more than a collection of endpoints. It is a network of identities, bookings, suppliers, payments, and state transitions. Drishti AI tests the rules that hold that network together.*
 
@@ -187,7 +187,7 @@ Status below reflects the latest development milestone reported by the project t
 | Role-aware Playwright discovery | **Complete** | Isolated multi-tenant browser contexts with fail-closed NetworkBridge mediation |
 | Travel Security Intelligence Graph | **Complete** | NetworkX MultiDiGraph, typed schema, independent Quote/Hold/Booking/Payment/Refund lifecycles, and invariant binding |
 | Specialist executors (I-01 & I-02) | **Complete** | I-01 Tenant Isolation (BOLA) and I-02 Server-Authoritative Pricing (Amount & Currency Tampering) executors with guarded differential verification |
-| Verification Oracle & Finding Lifecycle | **Complete** | Independent out-of-band read-back, cryptographic manifest validation, transparent rubric scoring, and multi-state lifecycle machine |
+| Verification Oracle & Finding Lifecycle | **Hardened** | Independent out-of-band read-back, fail-closed canary token verification, cryptographic artifact re-computation, transparent rubric scoring, and SQLite-backed durable lifecycle machine |
 
 ## Repository layout
 
@@ -309,8 +309,8 @@ Latest reported automated test results:
 | Suite | Reported result |
 |---|---:|
 | Rust workspace | 40 passed |
-| Python suite | 199 passed |
-| **Combined** | **239 passed** |
+| Python suite | 212 passed |
+| **Combined** | **252 passed** |
 
 Run the commands above to reproduce the results in your own checkout. Test counts are a snapshot of the reported milestone and may change as the suite grows.
 

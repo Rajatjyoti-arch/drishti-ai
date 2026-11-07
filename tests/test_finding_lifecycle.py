@@ -25,9 +25,15 @@ def sample_verified_finding():
     )
 
 
-def test_finding_registration_and_initial_state(sample_verified_finding):
+@pytest.fixture
+def lifecycle_mgr(tmp_path):
+    """Provides an isolated SQLite-backed FindingLifecycleManager per test."""
+    return FindingLifecycleManager(db_path=tmp_path / "test_lifecycle.db")
+
+
+def test_finding_registration_and_initial_state(sample_verified_finding, lifecycle_mgr):
     """Registering a finding initializes state and transition history."""
-    mgr = FindingLifecycleManager()
+    mgr = lifecycle_mgr
     mgr.register_finding(sample_verified_finding, initial_state=FindingLifecycleState.CONFIRMED)
 
     assert mgr.get_state("VF-travel-001") == FindingLifecycleState.CONFIRMED
@@ -37,9 +43,9 @@ def test_finding_registration_and_initial_state(sample_verified_finding):
     assert history[0].to_state == FindingLifecycleState.CONFIRMED
 
 
-def test_valid_lifecycle_transitions(sample_verified_finding):
+def test_valid_lifecycle_transitions(sample_verified_finding, lifecycle_mgr):
     """CONFIRMED -> RETEST_REQUIRED -> VERIFYING -> FIXED workflow."""
-    mgr = FindingLifecycleManager()
+    mgr = lifecycle_mgr
     mgr.register_finding(sample_verified_finding, initial_state=FindingLifecycleState.CONFIRMED)
 
     # 1. Dev team deploys patch -> mark RETEST_REQUIRED
@@ -72,9 +78,9 @@ def test_valid_lifecycle_transitions(sample_verified_finding):
     assert len(mgr.get_history("VF-travel-001")) == 4
 
 
-def test_invalid_lifecycle_transition_raises_error(sample_verified_finding):
+def test_invalid_lifecycle_transition_raises_error(sample_verified_finding, lifecycle_mgr):
     """Direct invalid transition (e.g. CONFIRMED -> FIXED without verification) is rejected."""
-    mgr = FindingLifecycleManager()
+    mgr = lifecycle_mgr
     mgr.register_finding(sample_verified_finding, initial_state=FindingLifecycleState.CONFIRMED)
 
     with pytest.raises(ValueError, match="Invalid lifecycle transition"):
@@ -85,9 +91,9 @@ def test_invalid_lifecycle_transition_raises_error(sample_verified_finding):
         )
 
 
-def test_reopen_regression_transition(sample_verified_finding):
+def test_reopen_regression_transition(sample_verified_finding, lifecycle_mgr):
     """FIXED -> REOPENED when regression is detected in later scans."""
-    mgr = FindingLifecycleManager()
+    mgr = lifecycle_mgr
     mgr.register_finding(sample_verified_finding, initial_state=FindingLifecycleState.CONFIRMED)
 
     mgr.transition_state("VF-travel-001", FindingLifecycleState.RETEST_REQUIRED, "Retest")
@@ -104,9 +110,9 @@ def test_reopen_regression_transition(sample_verified_finding):
     assert mgr.get_state("VF-travel-001") == FindingLifecycleState.REOPENED
 
 
-def test_list_findings_filter(sample_verified_finding):
+def test_list_findings_filter(sample_verified_finding, lifecycle_mgr):
     """Filter registered findings by lifecycle state."""
-    mgr = FindingLifecycleManager()
+    mgr = lifecycle_mgr
     mgr.register_finding(sample_verified_finding, initial_state=FindingLifecycleState.CONFIRMED)
 
     confirmed = mgr.list_findings(state=FindingLifecycleState.CONFIRMED)

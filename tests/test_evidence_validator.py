@@ -77,6 +77,7 @@ def test_validator_verifies_canary_secret_digest():
         url="http://test/api/v2/bookings/TBOH_1",
         status_code=200,
         response_digest="c" * 64,
+        policy_decision_nonce="dec_0123456789ab",
     )
     manifest = EvidenceManifest(
         plan_id="PLAN-CANARY",
@@ -84,6 +85,7 @@ def test_validator_verifies_canary_secret_digest():
         invariant_id=InvariantType.TENANT_ISOLATION,
         evidence_references=[ref_nc],
         canary_spec_digest=expected_digest,
+        audit_ledger_checkpoint="chk_1234567890abcdef",
     )
 
     # Valid secret

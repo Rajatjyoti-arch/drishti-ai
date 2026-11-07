@@ -111,7 +111,7 @@ async def test_oracle_confirms_i01_bola_on_vulnerable_app(hypothesis_i01):
 
     assert verif_res.status == VerificationStatus.CONFIRMED
     assert verif_res.confidence_score >= 0.95
-    assert "Independent read-back confirmed" in verif_res.confidence_rationale
+    assert "read-back confirmed" in verif_res.confidence_rationale
 
     vf = verif_res.verified_finding
     assert vf is not None

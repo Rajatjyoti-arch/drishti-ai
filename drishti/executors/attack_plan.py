@@ -135,18 +135,26 @@ class NegativeControl(BaseModel):
 class CanarySecretStore:
     """Protected in-memory execution-time store for high-entropy canary secret values."""
     _store: Dict[str, str] = {}
+    _digest_map: Dict[str, str] = {}
 
     @classmethod
     def store_secret(cls, secret_ref: str, value: str) -> None:
         cls._store[secret_ref] = value
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+        cls._digest_map[digest] = value
 
     @classmethod
     def get_secret(cls, secret_ref: str) -> Optional[str]:
         return cls._store.get(secret_ref)
 
     @classmethod
+    def get_secret_by_digest(cls, digest: str) -> Optional[str]:
+        return cls._digest_map.get(digest)
+
+    @classmethod
     def clear(cls) -> None:
         cls._store.clear()
+        cls._digest_map.clear()
 
 
 class CanarySpec(BaseModel):
