@@ -287,6 +287,15 @@ def validate_transition(
     )
 
 
+class IdempotencyRecord(BaseModel):
+    """Stores metadata for an executed idempotent operation to detect replay vs conflict."""
+    idempotency_key: str
+    tenant_id: str
+    operation: str
+    payload_hash: str
+    status: str = "COMPLETED"
+
+
 def validate_refund_bounds(
     captured_amount: int,
     prior_refunds: List[int],
@@ -296,11 +305,17 @@ def validate_refund_bounds(
 
     All amounts are in minor units (e.g. cents/paise).
     """
-    total_prior = sum(prior_refunds)
-    remaining_refundable = captured_amount - total_prior
+    if captured_amount < 0:
+        return False, "Captured amount cannot be negative."
+
+    if any(r < 0 for r in prior_refunds):
+        return False, "Prior refund amounts cannot be negative."
 
     if requested_refund <= 0:
         return False, "Refund amount must be positive."
+
+    total_prior = sum(prior_refunds)
+    remaining_refundable = captured_amount - total_prior
 
     if requested_refund > remaining_refundable:
         return False, (
@@ -314,9 +329,30 @@ def validate_refund_bounds(
 
 def validate_payment_idempotency(
     idempotency_key: str,
-    completed_keys: Set[str],
+    completed_keys: Any,
+    tenant_id: Optional[str] = None,
+    operation: Optional[str] = None,
+    payload_hash: Optional[str] = None,
 ) -> Tuple[bool, str]:
-    """Validates Invariant I-04: repeated operations must be idempotent and not create duplicate side effects."""
-    if idempotency_key in completed_keys:
+    """Validates Invariant I-04: repeated operations must be idempotent and not create duplicate side effects.
+
+    Detects payload conflicts when an existing idempotency key is reused with a different payload or context.
+    """
+    if isinstance(completed_keys, dict) and idempotency_key in completed_keys:
+        rec = completed_keys[idempotency_key]
+        if isinstance(rec, IdempotencyRecord):
+            if (
+                (tenant_id and rec.tenant_id != tenant_id)
+                or (operation and rec.operation != operation)
+                or (payload_hash and rec.payload_hash != payload_hash)
+            ):
+                return True, (
+                    f"Idempotency conflict (I-04): Key '{idempotency_key}' reused with changed "
+                    f"payload, tenant, or operation context!"
+                )
         return True, f"Idempotent replay detected for key {idempotency_key}; returning existing result without state mutation."
+
+    if isinstance(completed_keys, (set, list)) and idempotency_key in completed_keys:
+        return True, f"Idempotent replay detected for key {idempotency_key}; returning existing result without state mutation."
+
     return False, f"Fresh idempotency key {idempotency_key}; proceeding with execution."

@@ -110,7 +110,7 @@ class PrincipalNode(BaseModel):
 
     @property
     def node_id(self) -> str:
-        return f"principal:{self.principal_id}"
+        return f"principal:{self.tenant_id}:{self.principal_id}"
 
 
 class RoleNode(BaseModel):
@@ -178,7 +178,7 @@ class BusinessObjectNode(BaseModel):
 
     @property
     def node_id(self) -> str:
-        return f"obj:{self.object_type.lower()}:{self.object_id}"
+        return f"obj:{self.owner_tenant_id}:{self.object_type.lower()}:{self.object_id}"
 
 
 class WorkflowStateNode(BaseModel):

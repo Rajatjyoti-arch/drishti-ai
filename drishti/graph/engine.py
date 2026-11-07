@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import urlparse
 
 import networkx as nx
 
@@ -46,6 +47,7 @@ from drishti.graph.state_machine import (
     TRANSITION_RULES,
     BookingState,
     HoldState,
+    IdempotencyRecord,
     PaymentState,
     QuoteState,
     RefundState,
@@ -192,7 +194,7 @@ class TravelSecurityGraph:
         return node_id
 
     def add_principal(self, principal: PrincipalNode) -> str:
-        """Adds a principal user/agent and links to its Tenant."""
+        """Adds a tenant-namespaced principal user/agent and links to its Tenant."""
         node_id = principal.node_id
         self._graph.add_node(
             node_id,
@@ -203,15 +205,17 @@ class TravelSecurityGraph:
             metadata=principal.metadata,
         )
         tenant_node = f"tenant:{principal.tenant_id}"
-        if self._graph.has_node(tenant_node):
-            self.add_edge(
-                GraphEdge(
-                    source_id=node_id,
-                    target_id=tenant_node,
-                    edge_type=EdgeType.BELONGS_TO_TENANT,
-                    classification=FactClassification.DECLARED,
-                )
+        if not self._graph.has_node(tenant_node):
+            self.add_tenant(TenantNode(tenant_id=principal.tenant_id, name=principal.tenant_id))
+        self.add_edge(
+            GraphEdge(
+                source_id=node_id,
+                target_id=tenant_node,
+                edge_type=EdgeType.BELONGS_TO_TENANT,
+                classification=FactClassification.DECLARED,
+                tenant_context=principal.tenant_id,
             )
+        )
         return node_id
 
     def add_role(self, role: RoleNode) -> str:
@@ -226,15 +230,17 @@ class TravelSecurityGraph:
         )
         if role.tenant_id:
             tenant_node = f"tenant:{role.tenant_id}"
-            if self._graph.has_node(tenant_node):
-                self.add_edge(
-                    GraphEdge(
-                        source_id=node_id,
-                        target_id=tenant_node,
-                        edge_type=EdgeType.BELONGS_TO_TENANT,
-                        classification=FactClassification.DECLARED,
-                    )
+            if not self._graph.has_node(tenant_node):
+                self.add_tenant(TenantNode(tenant_id=role.tenant_id, name=role.tenant_id))
+            self.add_edge(
+                GraphEdge(
+                    source_id=node_id,
+                    target_id=tenant_node,
+                    edge_type=EdgeType.BELONGS_TO_TENANT,
+                    classification=FactClassification.DECLARED,
+                    tenant_context=role.tenant_id,
                 )
+            )
         return node_id
 
     def add_asset(self, asset: AssetNode) -> str:
@@ -279,7 +285,7 @@ class TravelSecurityGraph:
         return node_id
 
     def add_parameter(self, param: ParameterNode) -> str:
-        """Adds an endpoint parameter and links to Endpoint."""
+        """Adds an endpoint parameter, preserving location, and links to Endpoint."""
         node_id = param.node_id
         self._graph.add_node(
             node_id,
@@ -304,7 +310,7 @@ class TravelSecurityGraph:
         return node_id
 
     def add_business_object(self, obj: BusinessObjectNode) -> str:
-        """Adds a business object and links ownership to Tenant."""
+        """Adds a tenant-namespaced business object and links ownership and endpoint consumers."""
         node_id = obj.node_id
         self._graph.add_node(
             node_id,
@@ -328,6 +334,34 @@ class TravelSecurityGraph:
                 tenant_context=obj.owner_tenant_id,
             )
         )
+
+        # Connect PRODUCES and CONSUMES relationships from endpoints in graph
+        obj_type_lower = obj.object_type.lower()
+        for ep_n, ep_data in list(self._graph.nodes(data=True)):
+            if ep_data.get("node_type") == NodeType.ENDPOINT.value:
+                route = ep_data.get("route_template", "").lower()
+                method = ep_data.get("method", "").upper()
+                if f"/{obj_type_lower}s" in route or f"/{obj_type_lower}" in route:
+                    if method in ("GET", "PUT", "DELETE", "PATCH"):
+                        self.add_edge(
+                            GraphEdge(
+                                source_id=ep_n,
+                                target_id=node_id,
+                                edge_type=EdgeType.CONSUMES,
+                                classification=FactClassification.DECLARED,
+                                tenant_context=obj.owner_tenant_id,
+                            )
+                        )
+                    elif method == "POST":
+                        self.add_edge(
+                            GraphEdge(
+                                source_id=ep_n,
+                                target_id=node_id,
+                                edge_type=EdgeType.PRODUCES,
+                                classification=FactClassification.DECLARED,
+                                tenant_context=obj.owner_tenant_id,
+                            )
+                        )
         return node_id
 
     def add_workflow_state(self, state: WorkflowStateNode) -> str:
@@ -528,7 +562,16 @@ class TravelSecurityGraph:
         evidence_id: str,
         tenant_context: Optional[str] = None,
     ) -> str:
-        """Records runtime evidence showing a business object transitioned states."""
+        """Records runtime evidence showing a business object transitioned states.
+
+        Evaluates declared rules: flags POTENTIAL_INVARIANT_VIOLATION if transition was prohibited.
+        """
+        outcome, rationale, bound_invariant = validate_transition(object_type, from_state, to_state)
+        is_violation = (outcome == TransitionOutcome.DENIED)
+        assessment = "POTENTIAL_INVARIANT_VIOLATION" if is_violation else (
+            "CONSISTENT" if outcome == TransitionOutcome.ALLOWED else "UNDECLARED"
+        )
+
         source = f"state:{object_type}:{from_state}"
         target = f"state:{object_type}:{to_state}"
         edge = GraphEdge(
@@ -538,6 +581,13 @@ class TravelSecurityGraph:
             classification=FactClassification.OBSERVED,
             evidence_refs=[evidence_id],
             tenant_context=tenant_context,
+            metadata={
+                "declared_outcome": outcome.value,
+                "assessment": assessment,
+                "potential_invariant_violation": is_violation,
+                "bound_invariant": bound_invariant,
+                "rationale": rationale,
+            },
         )
         return self.add_edge(edge)
 
@@ -546,7 +596,7 @@ class TravelSecurityGraph:
     # =========================================================================
 
     def ingest_normalized_endpoints(self, endpoints: List[NormalizedEndpoint]) -> None:
-        """Ingests normalized endpoints, extracting Asset, Parameters, and Observed Roles."""
+        """Ingests normalized endpoints, preserving parameter locations and connecting objects."""
         for nep in endpoints:
             ep_node = EndpointNode(
                 endpoint_identity=nep.endpoint_identity,
@@ -559,32 +609,34 @@ class TravelSecurityGraph:
             )
             self.add_endpoint(ep_node)
 
-            # Ingest path parameters
+            # Ingest path and body parameters preserving actual location!
             for p in nep.parameters:
                 p_name_lower = p.name.lower()
                 is_fin = any(k in p_name_lower for k in FINANCIAL_KEYWORDS)
                 is_id = any(k in p_name_lower for k in IDENTIFIER_KEYWORDS)
+                loc = p.location if getattr(p, "location", None) else "path"
                 self.add_parameter(
                     ParameterNode(
                         endpoint_identity=nep.endpoint_identity,
                         name=p.name,
-                        location="path",
+                        location=loc,
                         semantic_type=p.semantic_type,
                         is_financial=is_fin,
                         is_identifier=is_id,
                     )
                 )
 
-            # Ingest query parameters
+            # Ingest query parameters preserving actual location!
             for q in nep.query_parameters:
                 q_name_lower = q.name.lower()
                 is_fin = any(k in q_name_lower for k in FINANCIAL_KEYWORDS)
                 is_id = any(k in q_name_lower for k in IDENTIFIER_KEYWORDS)
+                loc = q.location if getattr(q, "location", None) else "query"
                 self.add_parameter(
                     ParameterNode(
                         endpoint_identity=nep.endpoint_identity,
                         name=q.name,
-                        location="query",
+                        location=loc,
                         semantic_type=q.semantic_type,
                         is_financial=is_fin,
                         is_identifier=is_id,
@@ -623,6 +675,22 @@ class TravelSecurityGraph:
                     )
                 )
 
+            # Connect PRODUCES and CONSUMES relationships to existing business objects
+            for n_id, n_data in list(self._graph.nodes(data=True)):
+                if n_data.get("node_type") == NodeType.BUSINESS_OBJECT.value:
+                    ot = n_data.get("object_type", "").lower()
+                    if f"/{ot}s" in nep.route_template.lower() or f"/{ot}" in nep.route_template.lower():
+                        edge_type = EdgeType.PRODUCES if nep.method.upper() == "POST" and "{" not in nep.route_template else EdgeType.CONSUMES
+                        self.add_edge(
+                            GraphEdge(
+                                source_id=f"endpoint:{nep.endpoint_identity}",
+                                target_id=n_id,
+                                edge_type=edge_type,
+                                classification=FactClassification.DECLARED,
+                                tenant_context=n_data.get("owner_tenant_id"),
+                            )
+                        )
+
     def ingest_inventory_snapshot(self, snapshot: InventorySnapshot) -> None:
         """Ingests an InventorySnapshot.
 
@@ -636,14 +704,19 @@ class TravelSecurityGraph:
         observations: List[BrowserObservation],
         default_asset_id: str = "primary-api",
     ) -> None:
-        """Ingests browser crawler observations, linking roles, tenants, and request traces."""
+        """Ingests browser crawler observations, normalizing endpoints and linking roles, tenants, and request traces."""
         for obs in observations:
             obs_id = obs.observation_id
+            body_digest = (
+                hashlib.sha256(obs.request_body.encode("utf-8")).hexdigest()
+                if obs.request_body
+                else None
+            )
             obs_node = ObservationNode(
                 observation_id=obs_id,
                 source_type=EvidenceSourceType.CRAWLER,
                 timestamp=obs.timestamp,
-                canonical_digest=obs.request_body_sha256,
+                canonical_digest=body_digest,
                 confidence=1.0,
                 tenant_id=obs.tenant_id,
                 role_id=obs.role_name,
@@ -657,10 +730,78 @@ class TravelSecurityGraph:
             if not self._graph.has_node(tenant_node_id):
                 self.add_tenant(TenantNode(tenant_id=obs.tenant_id, name=obs.tenant_id))
 
-            # Ensure role exists
+            # Ensure role exists and is linked to tenant
             role_node_id = f"role:{obs.role_name}:{obs.tenant_id}"
             if not self._graph.has_node(role_node_id):
                 self.add_role(RoleNode(role_name=obs.role_name, tenant_id=obs.tenant_id))
+
+            # Derive canonical endpoint identity
+            parsed = urlparse(obs.url)
+            origin = ""
+            if parsed.scheme and parsed.hostname:
+                port_suffix = f":{parsed.port}" if parsed.port and parsed.port not in (80, 443) else ""
+                origin = f"{parsed.scheme}://{parsed.hostname}{port_suffix}"
+            route_template = parsed.path or "/"
+            method = obs.method.upper()
+            endpoint_identity = f"{default_asset_id}:{origin}:{method}:{route_template}"
+
+            ep_node_id = f"endpoint:{endpoint_identity}"
+            if not self._graph.has_node(ep_node_id):
+                self.add_endpoint(
+                    EndpointNode(
+                        endpoint_identity=endpoint_identity,
+                        method=method,
+                        route_template=route_template,
+                        asset_id=default_asset_id,
+                        canonical_origin=origin,
+                        roles_observed=[obs.role_name],
+                    )
+                )
+            else:
+                existing_roles = self._graph.nodes[ep_node_id].get("roles_observed", [])
+                if obs.role_name not in existing_roles:
+                    existing_roles.append(obs.role_name)
+                    self._graph.nodes[ep_node_id]["roles_observed"] = existing_roles
+
+            # 1. Link SUPPORTED_BY (Endpoint -> Observation)
+            self.add_edge(
+                GraphEdge(
+                    source_id=ep_node_id,
+                    target_id=f"obs:{obs_id}",
+                    edge_type=EdgeType.SUPPORTED_BY,
+                    classification=FactClassification.OBSERVED,
+                    evidence_refs=[obs_id],
+                    tenant_context=obs.tenant_id,
+                    role_context=obs.role_name,
+                )
+            )
+
+            # 2. Link OBSERVED_REQUESTED_BY (Endpoint -> Role)
+            self.add_edge(
+                GraphEdge(
+                    source_id=ep_node_id,
+                    target_id=role_node_id,
+                    edge_type=EdgeType.OBSERVED_REQUESTED_BY,
+                    classification=FactClassification.OBSERVED,
+                    evidence_refs=[obs_id],
+                    tenant_context=obs.tenant_id,
+                    role_context=obs.role_name,
+                )
+            )
+
+            # 3. Link OBSERVED_RESPONSE_TO (Endpoint -> Role)
+            self.add_edge(
+                GraphEdge(
+                    source_id=ep_node_id,
+                    target_id=role_node_id,
+                    edge_type=EdgeType.OBSERVED_RESPONSE_TO,
+                    classification=FactClassification.OBSERVED,
+                    evidence_refs=[obs_id],
+                    tenant_context=obs.tenant_id,
+                    role_context=obs.role_name,
+                    metadata={"status_code": obs.status_code},
+                )
+            )
 
     # =========================================================================
     # Invariant Binding
@@ -689,21 +830,28 @@ class TravelSecurityGraph:
                             target_id=node_id,
                             edge_type=EdgeType.BINDS_INVARIANT,
                             classification=FactClassification.DECLARED,
-                            timestamp="2026-01-01T00:00:00Z",
                             metadata={"target": "endpoint_tenant_boundary"},
                         )
                     )
 
+                # Check if endpoint has any financial parameter!
+                has_financial_param = False
+                for _, param_node, pdata in self._graph.out_edges(node_id, data=True):
+                    if pdata.get("edge_type") == EdgeType.HAS_PARAMETER.value:
+                        if self._graph.nodes[param_node].get("is_financial"):
+                            has_financial_param = True
+                            break
+
                 # Booking checkout or Quote generation requires Authoritative Pricing (I-02)
-                if any(segment in route for segment in ("/quotes", "/checkout", "/bookings", "/fare")):
-                    if method in ("POST", "PUT", "PATCH"):
+                # OR any endpoint with financial parameter (even unconventional routes)!
+                if has_financial_param or any(segment in route for segment in ("/quotes", "/checkout", "/bookings", "/fare")):
+                    if method in ("POST", "PUT", "PATCH") or has_financial_param:
                         self.add_edge(
                             GraphEdge(
                                 source_id=inv_i02,
                                 target_id=node_id,
                                 edge_type=EdgeType.BINDS_INVARIANT,
                                 classification=FactClassification.DECLARED,
-                                timestamp="2026-01-01T00:00:00Z",
                                 metadata={"target": "authoritative_pricing_gate"},
                             )
                         )
@@ -716,7 +864,6 @@ class TravelSecurityGraph:
                             target_id=node_id,
                             edge_type=EdgeType.BINDS_INVARIANT,
                             classification=FactClassification.DECLARED,
-                            timestamp="2026-01-01T00:00:00Z",
                             metadata={"target": "hold_validity_check"},
                         )
                     )
@@ -729,7 +876,6 @@ class TravelSecurityGraph:
                             target_id=node_id,
                             edge_type=EdgeType.BINDS_INVARIANT,
                             classification=FactClassification.DECLARED,
-                            timestamp="2026-01-01T00:00:00Z",
                             metadata={"target": "idempotency_and_bounds"},
                         )
                     )
@@ -744,7 +890,6 @@ class TravelSecurityGraph:
                             target_id=node_id,
                             edge_type=EdgeType.BINDS_INVARIANT,
                             classification=FactClassification.DECLARED,
-                            timestamp="2026-01-01T00:00:00Z",
                             metadata={"param_type": "financial_amount"},
                         )
                     )
@@ -755,7 +900,6 @@ class TravelSecurityGraph:
                             target_id=node_id,
                             edge_type=EdgeType.BINDS_INVARIANT,
                             classification=FactClassification.DECLARED,
-                            timestamp="2026-01-01T00:00:00Z",
                             metadata={"param_type": "tenant_boundary_identifier"},
                         )
                     )
@@ -771,7 +915,8 @@ class TravelSecurityGraph:
     ) -> List[HypothesisNode]:
         """Extracts bounded, evidence-backed security hypotheses from graph topology differences.
 
-        Does NOT declare vulnerabilities; formulates candidate test hypotheses.
+        Traverses actual tenant-to-role-to-endpoint-to-business-object ownership paths:
+        Attacker (Tenant) -> Role -> Endpoint -> CONSUMES -> Object -> OWNS <- Victim (Tenant).
         """
         hypotheses: List[HypothesisNode] = []
         inv_i01 = InvariantType.TENANT_ISOLATION.value
@@ -792,8 +937,13 @@ class TravelSecurityGraph:
                     evs.append(ev_ref)
             return sorted(list(set(evs)))
 
-        # 1. BOLA / IDOR Hypotheses (I-01)
-        # Endpoints bound to I-01 operating on victim resources that attacker can reach
+        def _make_hypo_id(inv_id: str, ep_identity: str, attacker: str, victim: str, variant: str = "default") -> str:
+            inv_short = inv_id.split("-")[0] if "-" in inv_id else inv_id[:4]
+            raw = f"{inv_id}:{ep_identity}:{attacker}:{victim}:{variant}"
+            digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+            return f"HYP-{inv_short}-{digest}"
+
+        # 1. BOLA / IDOR Hypotheses (I-01) via Graph Path Traversal
         for node_id, data in list(self._graph.nodes(data=True)):
             if data.get("node_type") == NodeType.ENDPOINT.value:
                 # Check if bound to I-01
@@ -805,25 +955,43 @@ class TravelSecurityGraph:
                 if is_i01_bound:
                     ep_identity = data.get("endpoint_identity")
                     ev_ids = _get_evidence_for_endpoint(node_id)
-                    hypo_id = f"HYP-BOLA-{hashlib.sha256(ep_identity.encode('utf-8')).hexdigest()[:8]}"
-                    hypo = HypothesisNode(
-                        hypothesis_id=hypo_id,
-                        invariant_id=inv_i01,
-                        target_endpoint_identity=ep_identity,
-                        attacker_tenant_id=attacker_tenant_id,
-                        victim_tenant_id=victim_tenant_id,
-                        rationale=(
-                            f"Endpoint '{ep_identity}' accesses tenant-scoped resources. "
-                            f"Test if principal of '{attacker_tenant_id}' can access synthetic canary fixture of '{victim_tenant_id}'."
-                        ),
-                        risk_level="ROUTINE",
-                        supporting_evidence_ids=ev_ids,
+
+                    # Look for consumed objects owned by victim
+                    consumed_victim_objects = []
+                    for _, target, edge_data in self._graph.out_edges(node_id, data=True):
+                        if edge_data.get("edge_type") == EdgeType.CONSUMES.value:
+                            obj_data = self._graph.nodes.get(target, {})
+                            if obj_data.get("owner_tenant_id") == victim_tenant_id:
+                                consumed_victim_objects.append(target)
+
+                    # Check for verified authorization between attacker and endpoint
+                    has_auth_confirmed = any(
+                        src == f"tenant:{attacker_tenant_id}"
+                        for src, _, edge_data in self._graph.in_edges(node_id, data=True)
+                        if edge_data.get("edge_type") == EdgeType.AUTHORIZED_ACCESS_CONFIRMED.value
                     )
-                    hypotheses.append(hypo)
-                    self.add_hypothesis(hypo)
+
+                    if not has_auth_confirmed:
+                        hypo_id = _make_hypo_id(inv_i01, ep_identity, attacker_tenant_id, victim_tenant_id, "bola")
+                        target_desc = f"victim objects {consumed_victim_objects}" if consumed_victim_objects else f"'{victim_tenant_id}' resources"
+                        hypo = HypothesisNode(
+                            hypothesis_id=hypo_id,
+                            invariant_id=inv_i01,
+                            target_endpoint_identity=ep_identity,
+                            attacker_tenant_id=attacker_tenant_id,
+                            victim_tenant_id=victim_tenant_id,
+                            rationale=(
+                                f"Graph traversal path: Tenant '{attacker_tenant_id}' -> Endpoint '{ep_identity}' "
+                                f"-> CONSUMES -> {target_desc} owned by '{victim_tenant_id}'. "
+                                f"No AUTHORIZED_ACCESS_CONFIRMED edge exists. Test synthetic cross-tenant access."
+                            ),
+                            risk_level="ROUTINE",
+                            supporting_evidence_ids=ev_ids,
+                        )
+                        hypotheses.append(hypo)
+                        self.add_hypothesis(hypo)
 
         # 2. Pricing Integrity Hypotheses (I-02)
-        # Endpoints with financial parameters bound to I-02
         for node_id, data in list(self._graph.nodes(data=True)):
             if data.get("node_type") == NodeType.ENDPOINT.value:
                 is_i02_bound = any(
@@ -834,7 +1002,7 @@ class TravelSecurityGraph:
                 if is_i02_bound:
                     ep_identity = data.get("endpoint_identity")
                     ev_ids = _get_evidence_for_endpoint(node_id)
-                    hypo_id = f"HYP-PRICE-{hashlib.sha256(ep_identity.encode('utf-8')).hexdigest()[:8]}"
+                    hypo_id = _make_hypo_id(inv_i02, ep_identity, attacker_tenant_id, victim_tenant_id, "pricing")
                     hypo = HypothesisNode(
                         hypothesis_id=hypo_id,
                         invariant_id=inv_i02,
@@ -842,7 +1010,7 @@ class TravelSecurityGraph:
                         attacker_tenant_id=attacker_tenant_id,
                         victim_tenant_id=victim_tenant_id,
                         rationale=(
-                            f"Endpoint '{ep_identity}' accepts checkout or booking parameters. "
+                            f"Endpoint '{ep_identity}' is bound to pricing integrity (I-02). "
                             f"Test if client-submitted price tampering or currency swap overrides server-authoritative quote."
                         ),
                         risk_level="ROUTINE",
@@ -862,7 +1030,7 @@ class TravelSecurityGraph:
                 if is_i03_bound:
                     ep_identity = data.get("endpoint_identity")
                     ev_ids = _get_evidence_for_endpoint(node_id)
-                    hypo_id = f"HYP-HOLD-{hashlib.sha256(ep_identity.encode('utf-8')).hexdigest()[:8]}"
+                    hypo_id = _make_hypo_id(inv_i03, ep_identity, attacker_tenant_id, victim_tenant_id, "hold_expiry")
                     hypo = HypothesisNode(
                         hypothesis_id=hypo_id,
                         invariant_id=inv_i03,
@@ -890,7 +1058,7 @@ class TravelSecurityGraph:
                 if is_i04_bound:
                     ep_identity = data.get("endpoint_identity")
                     ev_ids = _get_evidence_for_endpoint(node_id)
-                    hypo_id = f"HYP-REFUND-{hashlib.sha256(ep_identity.encode('utf-8')).hexdigest()[:8]}"
+                    hypo_id = _make_hypo_id(inv_i04, ep_identity, attacker_tenant_id, victim_tenant_id, "refund_bounds")
                     hypo = HypothesisNode(
                         hypothesis_id=hypo_id,
                         invariant_id=inv_i04,
@@ -910,33 +1078,23 @@ class TravelSecurityGraph:
         return hypotheses
 
     # =========================================================================
-    # Export and Deterministic Serialization
+    # Export, Digest and Serialization
     # =========================================================================
 
-    def to_dict(self, deterministic: bool = True) -> Dict[str, Any]:
-        """Serializes the graph into a deterministic dictionary sorted by keys."""
+    def to_dict(self) -> Dict[str, Any]:
+        """Serializes the graph into a dictionary, strictly preserving original timestamps."""
         sorted_nodes = []
         for n in sorted(self._graph.nodes()):
-            node_data = dict(self._graph.nodes[n])
-            if deterministic:
-                if "timestamp" in node_data:
-                    node_data["timestamp"] = "2026-01-01T00:00:00Z"
-                if "discovered_at" in node_data:
-                    node_data["discovered_at"] = "2026-01-01T00:00:00Z"
-            sorted_nodes.append({"id": n, **node_data})
+            sorted_nodes.append({"id": n, **dict(self._graph.nodes[n])})
 
         sorted_edges = []
         for u, v, k, data in sorted(self._graph.edges(keys=True, data=True), key=lambda x: (x[0], x[1], x[2])):
-            edge_data = dict(data)
-            if deterministic and "timestamp" in edge_data:
-                edge_data["timestamp"] = "2026-01-01T00:00:00Z"
-            edge_entry = {
+            sorted_edges.append({
                 "source": u,
                 "target": v,
                 "key": k,
-                **edge_data,
-            }
-            sorted_edges.append(edge_entry)
+                **dict(data),
+            })
 
         return {
             "version": "1.0.0",
@@ -946,16 +1104,41 @@ class TravelSecurityGraph:
             "edges": sorted_edges,
         }
 
-    def to_json(self, indent: int = 2, deterministic: bool = True) -> str:
-        """Serializes the graph into deterministic JSON string."""
-        data = self.to_dict(deterministic=deterministic)
-        return json.dumps(data, indent=indent, sort_keys=True)
+    def to_json(self, indent: int = 2) -> str:
+        """Serializes the graph into formatted JSON string, preserving true timestamps."""
+        return json.dumps(self.to_dict(), indent=indent, sort_keys=True)
+
+    def canonical_digest(self) -> str:
+        """Computes a deterministic cryptographic hash over the graph structure and invariants.
+
+        Excludes volatile timestamps while verifying identical nodes, edges, invariant bindings,
+        parameter locations, and state lifecycles.
+        """
+        stable_nodes = []
+        for n in sorted(self._graph.nodes()):
+            data = dict(self._graph.nodes[n])
+            data.pop("timestamp", None)
+            data.pop("discovered_at", None)
+            data.pop("created_at", None)
+            stable_nodes.append((n, data))
+
+        stable_edges = []
+        for u, v, k, data in sorted(self._graph.edges(keys=True, data=True), key=lambda x: (x[0], x[1], x[2])):
+            data = dict(data)
+            data.pop("timestamp", None)
+            stable_edges.append((u, v, data.get("edge_type"), data.get("classification"), sorted(data.get("evidence_refs", []))))
+
+        payload = {
+            "nodes": stable_nodes,
+            "edges": stable_edges,
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     def export_mermaid(self) -> str:
         """Exports the graph topology and state machines to a Mermaid diagram string."""
         lines = ["flowchart TD"]
 
-        # Classify by node type
         tenants = []
         endpoints = []
         invariants = []

@@ -40,7 +40,7 @@ def test_schema_node_identity_determinism():
     assert tenant.node_id == "tenant:TENANT-AGENCY-A"
 
     principal = PrincipalNode(principal_id="user_alpha", tenant_id="TENANT-AGENCY-A", roles=["Agency_Admin"])
-    assert principal.node_id == "principal:user_alpha"
+    assert principal.node_id == "principal:TENANT-AGENCY-A:user_alpha"
 
     role = RoleNode(role_name="Agency_Admin", tenant_id="TENANT-AGENCY-A")
     assert role.node_id == "role:Agency_Admin:TENANT-AGENCY-A"
@@ -71,7 +71,7 @@ def test_schema_node_identity_determinism():
         owner_tenant_id="TENANT-AGENCY-A",
         canary_fixture_id="canary_xyz",
     )
-    assert obj.node_id == "obj:booking:BK-9999"
+    assert obj.node_id == "obj:TENANT-AGENCY-A:booking:BK-9999"
 
     state = WorkflowStateNode(object_type="Hold", state_name="EXPIRED")
     assert state.node_id == "state:Hold:EXPIRED"
