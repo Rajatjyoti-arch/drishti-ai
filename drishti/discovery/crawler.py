@@ -63,47 +63,55 @@ class JourneyCrawler:
 
         # Clear any residual observations on the bridge before starting this session
         obs_start_idx = len(self.network_bridge.observations)
+        timeout_seconds = journey_plan.max_duration_seconds or self.default_timeout_seconds
 
         context = None
         try:
-            context = await self.context_mgr.create_isolated_context(
-                browser=browser,
-                role_context=role_context,
-                session_id=session_id,
-            )
-            page = await context.new_page()
+            async def _run_session() -> None:
+                nonlocal context
+                context = await self.context_mgr.create_isolated_context(
+                    browser=browser,
+                    role_context=role_context,
+                    session_id=session_id,
+                )
+                page = await context.new_page()
 
-            # Execute journey steps in sequence
-            all_steps_succeeded = True
-            for step in journey_plan.steps:
-                if session.request_count >= session.max_requests:
-                    session.status = CrawlStatus.BUDGET_EXHAUSTED.value
-                    session.errors.append(f"Request budget exhausted ({session.max_requests}) at step {step.step_id}")
-                    all_steps_succeeded = False
-                    break
-
-                step_ok = await self._execute_step(page, step, role_context)
-                if step_ok:
-                    session.completed_steps.append(step.step_id)
-                else:
-                    all_steps_succeeded = False
-                    if step.is_critical:
-                        session.errors.append(f"Critical journey step {step.step_id} failed; halting journey.")
+                # Execute journey steps in sequence
+                all_steps_succeeded = True
+                for step in journey_plan.steps:
+                    # Dynamically check real-time request budget before each step
+                    current_obs_count = len(self.network_bridge.observations) - obs_start_idx
+                    session.request_count = current_obs_count
+                    if session.request_count >= session.max_requests:
+                        session.status = CrawlStatus.BUDGET_EXHAUSTED.value
+                        session.errors.append(f"Request budget exhausted ({session.max_requests}) at step {step.step_id}")
+                        all_steps_succeeded = False
                         break
 
-            # Capture completeness invariant: only COMPLETE if all steps succeeded without error
-            if all_steps_succeeded and len(session.completed_steps) == len(journey_plan.steps):
-                session.status = CrawlStatus.COMPLETED.value
-                session.capture_completeness = CaptureCompleteness.COMPLETE.value
-            else:
-                session.capture_completeness = CaptureCompleteness.PARTIAL.value
-                if session.status == CrawlStatus.IN_PROGRESS.value:
-                    session.status = CrawlStatus.FAILED.value
+                    step_ok = await self._execute_step(page, step, role_context)
+                    if step_ok:
+                        session.completed_steps.append(step.step_id)
+                    else:
+                        all_steps_succeeded = False
+                        if step.is_critical:
+                            session.errors.append(f"Critical journey step {step.step_id} failed; halting journey.")
+                            break
+
+                # Capture completeness invariant: only COMPLETE if all steps succeeded without error
+                if all_steps_succeeded and len(session.completed_steps) == len(journey_plan.steps):
+                    session.status = CrawlStatus.COMPLETED.value
+                    session.capture_completeness = CaptureCompleteness.COMPLETE.value
+                else:
+                    session.capture_completeness = CaptureCompleteness.PARTIAL.value
+                    if session.status == CrawlStatus.IN_PROGRESS.value:
+                        session.status = CrawlStatus.FAILED.value
+
+            await asyncio.wait_for(_run_session(), timeout=timeout_seconds)
 
         except asyncio.TimeoutError:
             session.status = CrawlStatus.TIMEOUT.value
             session.capture_completeness = CaptureCompleteness.PARTIAL.value
-            session.errors.append("Journey execution timed out.")
+            session.errors.append(f"Journey execution timed out after {timeout_seconds}s.")
         except Exception as e:
             session.status = CrawlStatus.FAILED.value
             session.capture_completeness = CaptureCompleteness.PARTIAL.value
@@ -111,7 +119,7 @@ class JourneyCrawler:
         finally:
             session.end_time = datetime.now(timezone.utc).isoformat()
             if context:
-                await self.context_mgr.close_context(role_context.role_identifier)
+                await self.context_mgr.close_context(session_id)
 
         session_observations = self.network_bridge.observations[obs_start_idx:]
         session.request_count = len(session_observations)
@@ -139,17 +147,22 @@ class JourneyCrawler:
                 return True
 
             elif step.action_type == ActionType.API_CALL.value:
-                # Dispatches an asynchronous fetch from inside the page context
+                # Dispatches an asynchronous fetch from inside the page context using parameterized arguments
                 method = (step.value or "GET").upper()
-                body_script = f"JSON.stringify({step.payload})" if step.payload else "undefined"
-                js_code = f"""
-                fetch("{step.target}", {{
-                    method: "{method}",
-                    headers: {{ "Content-Type": "application/json" }},
-                    body: {body_script}
-                }}).then(r => r.status)
+                js_func = """
+                async ([url, method, payload]) => {
+                    const opts = {
+                        method: method,
+                        headers: { "Content-Type": "application/json" }
+                    };
+                    if (payload) {
+                        opts.body = JSON.stringify(payload);
+                    }
+                    const res = await fetch(url, opts);
+                    return res.status;
+                }
                 """
-                status = await page.evaluate(js_code)
+                status = await page.evaluate(js_func, [step.target, method, step.payload])
                 if step.expected_status and status != step.expected_status:
                     logger.warning(f"Step {step.step_id} API call expected {step.expected_status}, got {status}")
                     return False

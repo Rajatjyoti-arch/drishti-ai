@@ -29,10 +29,13 @@ class HarCaptureExporter:
         entries = []
         for obs in observations:
             parsed = urlparse(obs.url)
-            query_params = [
-                {"name": k, "value": v}
-                for k, v in parse_qsl(parsed.query, keep_blank_values=True)
-            ]
+            query_params = []
+            for k, v in parse_qsl(parsed.query, keep_blank_values=True):
+                k_lower = k.lower()
+                if any(s in k_lower for s in ("token", "secret", "auth", "password", "key", "credential")):
+                    query_params.append({"name": k, "value": "[REDACTED]"})
+                else:
+                    query_params.append({"name": k, "value": v})
 
             req_headers = [
                 {"name": k, "value": v}
@@ -46,9 +49,27 @@ class HarCaptureExporter:
 
             post_data = None
             if obs.request_body:
+                sanitized_text = obs.request_body
+                try:
+                    loaded = json.loads(obs.request_body)
+                    if isinstance(loaded, dict):
+                        def _redact_dict(d: dict) -> dict:
+                            res = {}
+                            for dk, dv in d.items():
+                                if any(s in dk.lower() for s in ("token", "secret", "password", "auth", "credential", "credit_card")):
+                                    res[dk] = "[REDACTED]"
+                                elif isinstance(dv, dict):
+                                    res[dk] = _redact_dict(dv)
+                                else:
+                                    res[dk] = dv
+                            return res
+                        sanitized_text = json.dumps(_redact_dict(loaded))
+                except Exception:
+                    pass
+
                 post_data = {
                     "mimeType": obs.request_headers.get("content-type", "application/json"),
-                    "text": obs.request_body,
+                    "text": sanitized_text,
                 }
 
             resp_content = {
@@ -143,6 +164,10 @@ class HarCaptureExporter:
                 raw_url=obs.url,
                 response_status=obs.status_code,
                 role=obs.role_name,
+                tenant_id=obs.tenant_id,
+                session_id=obs.session_id,
+                request_headers=obs.request_headers,
+                request_body=parsed_body if parsed_body is not None else obs.request_body,
                 asset_id=default_asset_id,
             )
             results.append(endpoint_obs)

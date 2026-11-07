@@ -74,6 +74,10 @@ class EndpointObservation(BaseModel):
     source: str = "HAR"
     canonical_digest: Optional[str] = None
     role: Optional[str] = None
+    tenant_id: Optional[str] = None
+    session_id: Optional[str] = None
+    request_headers: Dict[str, str] = Field(default_factory=dict)
+    request_body: Optional[Any] = None
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     response_status: Optional[int] = None
     content_type: Optional[str] = None

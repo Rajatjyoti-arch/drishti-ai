@@ -21,9 +21,11 @@ class BrowserContextManager:
     to intercept all context-level network activity.
     """
 
-    def __init__(self, network_bridge: NetworkBridge):
+    def __init__(self, network_bridge: NetworkBridge, ignore_https_errors: bool = False):
         self.network_bridge = network_bridge
+        self.ignore_https_errors = ignore_https_errors
         self.active_contexts: Dict[str, Any] = {}
+        self._role_to_session: Dict[str, str] = {}
 
     async def create_isolated_context(
         self,
@@ -31,6 +33,7 @@ class BrowserContextManager:
         role_context: RoleContext,
         session_id: str,
         current_step_id: Optional[str] = None,
+        ignore_https_errors: Optional[bool] = None,
     ) -> Any:
         """Initializes a new isolated Playwright BrowserContext for a specific tenant/role.
 
@@ -39,8 +42,9 @@ class BrowserContextManager:
         - Custom user agent if provided.
         - NetworkBridge route interception on all outbound requests (**/*).
         """
+        allow_insecure = self.ignore_https_errors if ignore_https_errors is None else ignore_https_errors
         context_options: Dict[str, Any] = {
-            "ignore_https_errors": True,
+            "ignore_https_errors": allow_insecure,
         }
         if role_context.user_agent:
             context_options["user_agent"] = role_context.user_agent
@@ -64,17 +68,22 @@ class BrowserContextManager:
 
         await context.route("**/*", route_handler)
 
-        self.active_contexts[role_context.role_identifier] = context
+        self.active_contexts[session_id] = context
+        self._role_to_session[role_context.role_identifier] = session_id
         return context
 
-    async def close_context(self, role_identifier: str) -> None:
-        """Closes and releases an active browser context."""
-        context = self.active_contexts.pop(role_identifier, None)
+    async def close_context(self, identifier: str) -> None:
+        """Closes and releases an active browser context by session_id or role_identifier."""
+        context = self.active_contexts.pop(identifier, None)
+        if not context and identifier in self._role_to_session:
+            sess_id = self._role_to_session.pop(identifier, None)
+            if sess_id:
+                context = self.active_contexts.pop(sess_id, None)
         if context:
             try:
                 await context.close()
             except Exception as e:
-                logger.warning(f"Error closing browser context for {role_identifier}: {e}")
+                logger.warning(f"Error closing browser context for {identifier}: {e}")
 
     async def close_all(self) -> None:
         """Closes all active browser contexts."""
