@@ -30,6 +30,7 @@ from drishti.executors.attack_plan import (
 )
 from drishti.executors.base import ISpecialistExecutor
 from drishti.policy.client import SafeHttpClient
+from drishti.verifier.models import ExecutionOutcome, ExecutorRunResult
 
 logger = logging.getLogger(__name__)
 
@@ -51,17 +52,19 @@ class BOLAExecutor(ISpecialistExecutor):
         plan: AttackPlan,
         base_url: str = "",
         approval_token: Optional[str] = None,
-    ) -> Optional[CandidateFinding]:
+    ) -> ExecutorRunResult:
         """Executes the multi-step I-01 tenant isolation attack plan.
 
         Returns:
-            CandidateFinding: If the cross-tenant probe returns 200 OK and discloses victim canary data.
-            None: If the target rejects unauthorized cross-tenant read (401/403/404) or controls fail.
+            ExecutorRunResult: Encapsulating ExecutionOutcome (CANDIDATE, EXPECTED_REJECTION,
+            INCONCLUSIVE, ABORTED), evidence manifest, and candidate finding if observed.
 
         IMPORTANT: Emits CandidateFinding only, NEVER a confirmed finding.
         Final verification and lifecycle transitions are strictly owned by the Verification Oracle.
         """
         self.start_execution(plan)
+        execution_id = f"run_{uuid.uuid4().hex[:12]}"
+        completed_steps: list[str] = []
 
         canary_spec = plan.canary_spec
         expected_canary_token: Optional[str] = None
@@ -88,6 +91,7 @@ class BOLAExecutor(ISpecialistExecutor):
                 resolved_url=resolved_url,
                 approval_token=approval_token,
             )
+            completed_steps.append(step.step_id)
 
             # Phase-specific invariant and negative control evaluation
             if step.phase == PlanPhase.SETUP:
@@ -108,7 +112,19 @@ class BOLAExecutor(ISpecialistExecutor):
                         f"{response.status_code} (expected {step.expected_status_baseline}). "
                         f"Target application environment is in unexpected state; aborting plan."
                     )
-                    return None
+                    manifest = self.build_evidence_manifest(plan, execution_id)
+                    return ExecutorRunResult(
+                        execution_id=execution_id,
+                        plan_id=plan.plan_id,
+                        invariant_id=self.supported_invariant,
+                        outcome=ExecutionOutcome.INCONCLUSIVE,
+                        candidate=None,
+                        evidence_manifest=manifest,
+                        completed_steps=completed_steps,
+                        failed_step=step.step_id,
+                        reason=f"Negative control step '{step.step_id}' returned HTTP {response.status_code} (expected {step.expected_status_baseline})",
+                        persisted_resource_id=self.execution_context.get("victim_booking_id"),
+                    )
 
                 # Verify canary visibility in victim's legitimate negative control read
                 if step.actor_tenant_id == plan.victim_tenant_id and expected_canary_token:
@@ -116,7 +132,19 @@ class BOLAExecutor(ISpecialistExecutor):
                         logger.warning(
                             f"Victim negative control read did not contain expected canary token; aborting."
                         )
-                        return None
+                        manifest = self.build_evidence_manifest(plan, execution_id)
+                        return ExecutorRunResult(
+                            execution_id=execution_id,
+                            plan_id=plan.plan_id,
+                            invariant_id=self.supported_invariant,
+                            outcome=ExecutionOutcome.INCONCLUSIVE,
+                            candidate=None,
+                            evidence_manifest=manifest,
+                            completed_steps=completed_steps,
+                            failed_step=step.step_id,
+                            reason="Victim negative control read did not contain expected canary token",
+                            persisted_resource_id=self.execution_context.get("victim_booking_id"),
+                        )
 
             elif step.phase == PlanPhase.PROBE:
                 probe_response = response
@@ -141,26 +169,71 @@ class BOLAExecutor(ISpecialistExecutor):
                             f"BOLA Vulnerability detected on '{plan.target_endpoint_identity}'! "
                             f"Attacker '{plan.attacker_tenant_id}' read victim '{plan.victim_tenant_id}' canary."
                         )
-                        return self._create_candidate_finding(
+                        candidate = self._create_candidate_finding(
                             plan=plan,
                             step=step,
                             response=response,
                             exec_res=exec_res,
+                        )
+                        manifest = self.build_evidence_manifest(plan, execution_id)
+                        return ExecutorRunResult(
+                            execution_id=execution_id,
+                            plan_id=plan.plan_id,
+                            invariant_id=self.supported_invariant,
+                            outcome=ExecutionOutcome.CANDIDATE,
+                            candidate=candidate,
+                            evidence_manifest=manifest,
+                            completed_steps=completed_steps,
+                            reason="Attacker successfully accessed victim private booking with canary disclosure",
+                            persisted_resource_id=self.execution_context.get("victim_booking_id"),
                         )
                     else:
                         logger.info(
                             f"Cross-tenant probe returned 200 OK, but exact planned canary value "
                             f"was not disclosed in the response payload."
                         )
-                        return None
+                        manifest = self.build_evidence_manifest(plan, execution_id)
+                        return ExecutorRunResult(
+                            execution_id=execution_id,
+                            plan_id=plan.plan_id,
+                            invariant_id=self.supported_invariant,
+                            outcome=ExecutionOutcome.INCONCLUSIVE,
+                            candidate=None,
+                            evidence_manifest=manifest,
+                            completed_steps=completed_steps,
+                            reason="Cross-tenant probe returned 200 OK without planned canary value",
+                            persisted_resource_id=self.execution_context.get("victim_booking_id"),
+                        )
                 elif response.status_code in {401, 403, 404}:
                     logger.info(
                         f"Cross-tenant read probe rejected with HTTP {response.status_code}. "
                         f"Tenant isolation invariant holds."
                     )
-                    return None
+                    manifest = self.build_evidence_manifest(plan, execution_id)
+                    return ExecutorRunResult(
+                        execution_id=execution_id,
+                        plan_id=plan.plan_id,
+                        invariant_id=self.supported_invariant,
+                        outcome=ExecutionOutcome.EXPECTED_REJECTION,
+                        candidate=None,
+                        evidence_manifest=manifest,
+                        completed_steps=completed_steps,
+                        reason=f"Cross-tenant read rejected with HTTP {response.status_code}",
+                        persisted_resource_id=self.execution_context.get("victim_booking_id"),
+                    )
 
-        return None
+        manifest = self.build_evidence_manifest(plan, execution_id)
+        return ExecutorRunResult(
+            execution_id=execution_id,
+            plan_id=plan.plan_id,
+            invariant_id=self.supported_invariant,
+            outcome=ExecutionOutcome.INCONCLUSIVE,
+            candidate=None,
+            evidence_manifest=manifest,
+            completed_steps=completed_steps,
+            reason="Plan completed without executing probe step",
+            persisted_resource_id=self.execution_context.get("victim_booking_id"),
+        )
 
     def _create_candidate_finding(
         self,

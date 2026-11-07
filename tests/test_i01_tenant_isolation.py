@@ -28,6 +28,7 @@ from drishti.policy.client import SafeHttpClient
 from drishti.policy.gate import PolicyGate
 from drishti.policy.transports import InProcessFixtureTransport
 from drishti.graph.schema import HypothesisNode
+from drishti.verifier.models import ExecutionOutcome, ExecutorRunResult
 from tests.fixtures.patched_app import create_patched_app
 from tests.fixtures.vulnerable_app import create_vulnerable_app
 
@@ -79,10 +80,12 @@ async def test_bola_executor_finds_vulnerability_on_vulnerable_app(hypothesis_i0
     )
 
     executor = BOLAExecutor(http_client=http_client)
-    finding = await executor.execute(plan, base_url="http://test")
+    run_res = await executor.execute(plan, base_url="http://test")
 
     # Verify a candidate finding was produced
-    assert finding is not None
+    assert run_res.outcome == ExecutionOutcome.CANDIDATE
+    assert run_res.candidate is not None
+    finding = run_res.candidate
     assert isinstance(finding, CandidateFinding)
     assert not isinstance(finding, VerifiedFinding)
     assert finding.observed_status_code == 200
@@ -116,10 +119,11 @@ async def test_bola_executor_reports_clean_on_patched_app(hypothesis_i01):
     )
 
     executor = BOLAExecutor(http_client=http_client)
-    finding = await executor.execute(plan, base_url="http://test")
+    run_res = await executor.execute(plan, base_url="http://test")
 
-    # On patched app, unauthorized cross-tenant read must return 403 Forbidden and yield no candidate finding
-    assert finding is None
+    # On patched app, unauthorized cross-tenant read must return 403 Forbidden and yield EXPECTED_REJECTION
+    assert run_res.outcome == ExecutionOutcome.EXPECTED_REJECTION
+    assert run_res.candidate is None
     assert len(executor.execution_history) == 5
     probe_exec = executor.execution_history[-1]
     assert probe_exec.status_code == 403
@@ -145,10 +149,11 @@ async def test_bola_executor_aborts_on_failed_negative_control(hypothesis_i01):
     plan.steps[2].endpoint_route_template = "/api/v2/non_existent_route"
 
     executor = BOLAExecutor(http_client=http_client)
-    finding = await executor.execute(plan, base_url="http://test")
+    run_res = await executor.execute(plan, base_url="http://test")
 
     # Must abort cleanly without executing probe
-    assert finding is None
+    assert run_res.outcome == ExecutionOutcome.INCONCLUSIVE
+    assert run_res.candidate is None
     # Should stop after step 3
     assert len(executor.execution_history) == 3
 

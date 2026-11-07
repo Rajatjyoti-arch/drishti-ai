@@ -33,6 +33,7 @@ from drishti.executors.attack_plan import (
 )
 from drishti.executors.base import ISpecialistExecutor
 from drishti.policy.client import SafeHttpClient
+from drishti.verifier.models import ExecutionOutcome, ExecutorRunResult
 
 logger = logging.getLogger(__name__)
 
@@ -66,18 +67,20 @@ class PricingIntegrityExecutor(ISpecialistExecutor):
         plan: AttackPlan,
         base_url: str = "",
         approval_token: Optional[str] = None,
-    ) -> Optional[CandidateFinding]:
+    ) -> ExecutorRunResult:
         """Executes the multi-step I-02 pricing integrity attack plan.
 
         Returns:
-            CandidateFinding: If the target accepts client-tampered price or currency in booking creation.
-            None: If the target enforces authoritative pricing and rejects the probe (e.g. HTTP 400).
+            ExecutorRunResult: Encapsulating ExecutionOutcome (CANDIDATE, EXPECTED_REJECTION,
+            INCONCLUSIVE, ABORTED), evidence manifest, and candidate finding if observed.
 
         IMPORTANT: Emits CandidateFinding only, NEVER a confirmed finding.
         Final verification and lifecycle transitions are strictly owned by the Verification Oracle.
         """
         self.start_execution(plan)
         self.baseline = None
+        execution_id = f"run_{uuid.uuid4().hex[:12]}"
+        completed_steps: list[str] = []
 
         # Resolve effective base URL
         effective_base_url = base_url
@@ -99,6 +102,7 @@ class PricingIntegrityExecutor(ISpecialistExecutor):
                 approval_token=approval_token,
                 resolved_body=resolved_body,
             )
+            completed_steps.append(step.step_id)
 
             # Phase 1: Setup - Search and Hold Acquisition
             if step.phase == PlanPhase.SETUP:
@@ -129,7 +133,18 @@ class PricingIntegrityExecutor(ISpecialistExecutor):
                         logger.warning(
                             f"Authoritative quote '{quote_id}' is expired (expires_at={expires_at}); aborting plan."
                         )
-                        return None
+                        manifest = self.build_evidence_manifest(plan, execution_id)
+                        return ExecutorRunResult(
+                            execution_id=execution_id,
+                            plan_id=plan.plan_id,
+                            invariant_id=self.supported_invariant,
+                            outcome=ExecutionOutcome.INCONCLUSIVE,
+                            candidate=None,
+                            evidence_manifest=manifest,
+                            completed_steps=completed_steps,
+                            failed_step=step.step_id,
+                            reason=f"Authoritative quote '{quote_id}' is expired ({expires_at} < current time)",
+                        )
 
                     quote_signature = f"{quote_id}:{amount}:{currency}:{expires_at}"
                     self.baseline = PricingBaseline(
@@ -148,53 +163,137 @@ class PricingIntegrityExecutor(ISpecialistExecutor):
                         f"Negative control '{step.step_id}' failed with HTTP {response.status_code} "
                         f"(expected {step.expected_status_baseline}). Aborting plan."
                     )
-                    return None
+                    manifest = self.build_evidence_manifest(plan, execution_id)
+                    return ExecutorRunResult(
+                        execution_id=execution_id,
+                        plan_id=plan.plan_id,
+                        invariant_id=self.supported_invariant,
+                        outcome=ExecutionOutcome.INCONCLUSIVE,
+                        candidate=None,
+                        evidence_manifest=manifest,
+                        completed_steps=completed_steps,
+                        failed_step=step.step_id,
+                        reason=f"Negative control step returned HTTP {response.status_code} (expected {step.expected_status_baseline})",
+                    )
 
-                # Verify confirmed untampered booking matches authoritative quote baseline
+                # Mandatory baseline verification: both confirmed amount and currency MUST be present
                 confirmed_amount = self.execution_context.get("confirmed_baseline_amount")
                 confirmed_currency = self.execution_context.get("confirmed_baseline_currency")
 
+                if confirmed_amount is None or confirmed_currency is None:
+                    logger.warning(
+                        "Negative control booking response missing confirmed amount or currency; "
+                        "cannot establish baseline validity. Aborting plan."
+                    )
+                    manifest = self.build_evidence_manifest(plan, execution_id)
+                    return ExecutorRunResult(
+                        execution_id=execution_id,
+                        plan_id=plan.plan_id,
+                        invariant_id=self.supported_invariant,
+                        outcome=ExecutionOutcome.INCONCLUSIVE,
+                        candidate=None,
+                        evidence_manifest=manifest,
+                        completed_steps=completed_steps,
+                        failed_step=step.step_id,
+                        reason="Negative control booking response missing confirmed amount or currency",
+                    )
+
                 if self.baseline:
-                    if confirmed_amount is not None and int(confirmed_amount) != self.baseline.amount_minor_units:
+                    if int(confirmed_amount) != self.baseline.amount_minor_units:
                         logger.warning(
                             f"Negative control booking amount ({confirmed_amount}) differs from "
                             f"authoritative quote ({self.baseline.amount_minor_units}); aborting."
                         )
-                        return None
-                    if confirmed_currency is not None and str(confirmed_currency) != self.baseline.currency:
+                        manifest = self.build_evidence_manifest(plan, execution_id)
+                        return ExecutorRunResult(
+                            execution_id=execution_id,
+                            plan_id=plan.plan_id,
+                            invariant_id=self.supported_invariant,
+                            outcome=ExecutionOutcome.INCONCLUSIVE,
+                            candidate=None,
+                            evidence_manifest=manifest,
+                            completed_steps=completed_steps,
+                            failed_step=step.step_id,
+                            reason=f"Negative control amount ({confirmed_amount}) differs from quote baseline ({self.baseline.amount_minor_units})",
+                        )
+                    if str(confirmed_currency) != self.baseline.currency:
                         logger.warning(
                             f"Negative control booking currency ({confirmed_currency}) differs from "
                             f"authoritative quote ({self.baseline.currency}); aborting."
                         )
-                        return None
+                        manifest = self.build_evidence_manifest(plan, execution_id)
+                        return ExecutorRunResult(
+                            execution_id=execution_id,
+                            plan_id=plan.plan_id,
+                            invariant_id=self.supported_invariant,
+                            outcome=ExecutionOutcome.INCONCLUSIVE,
+                            candidate=None,
+                            evidence_manifest=manifest,
+                            completed_steps=completed_steps,
+                            failed_step=step.step_id,
+                            reason=f"Negative control currency ({confirmed_currency}) differs from quote baseline ({self.baseline.currency})",
+                        )
 
             # Phase 3: Probe - Financial Manipulation Assessment
             elif step.phase == PlanPhase.PROBE:
+                baseline_summary = {
+                    "quote_id": self.baseline.quote_id if self.baseline else None,
+                    "amount_minor_units": self.baseline.amount_minor_units if self.baseline else None,
+                    "currency": self.baseline.currency if self.baseline else None,
+                }
+                tampered_amount = (
+                    resolved_body.get("client_amount_minor_units")
+                    if isinstance(resolved_body, dict)
+                    else None
+                )
+                tampered_currency = (
+                    resolved_body.get("client_currency")
+                    if isinstance(resolved_body, dict)
+                    else None
+                )
+                probe_summary = {
+                    "tampered_amount": tampered_amount,
+                    "tampered_currency": tampered_currency,
+                }
+
                 if response.status_code == 200:
                     try:
                         booking_data = response.json()
                     except Exception:
                         logger.warning("Probe returned 200 OK but body is not valid JSON; inconclusive.")
-                        return None
+                        manifest = self.build_evidence_manifest(plan, execution_id)
+                        return ExecutorRunResult(
+                            execution_id=execution_id,
+                            plan_id=plan.plan_id,
+                            invariant_id=self.supported_invariant,
+                            outcome=ExecutionOutcome.INCONCLUSIVE,
+                            candidate=None,
+                            evidence_manifest=manifest,
+                            completed_steps=completed_steps,
+                            reason="Probe returned 200 OK but response body is not valid JSON",
+                            baseline_summary=baseline_summary,
+                            probe_summary=probe_summary,
+                        )
 
                     if not isinstance(booking_data, dict):
                         logger.warning("Probe response JSON is not a dictionary; inconclusive.")
-                        return None
+                        manifest = self.build_evidence_manifest(plan, execution_id)
+                        return ExecutorRunResult(
+                            execution_id=execution_id,
+                            plan_id=plan.plan_id,
+                            invariant_id=self.supported_invariant,
+                            outcome=ExecutionOutcome.INCONCLUSIVE,
+                            candidate=None,
+                            evidence_manifest=manifest,
+                            completed_steps=completed_steps,
+                            reason="Probe response JSON is not a dictionary",
+                            baseline_summary=baseline_summary,
+                            probe_summary=probe_summary,
+                        )
 
                     actual_amount = booking_data.get("amount_minor_units")
                     actual_currency = booking_data.get("currency")
-
-                    # Check which parameter was tampered in the probe request
-                    tampered_amount = (
-                        resolved_body.get("client_amount_minor_units")
-                        if isinstance(resolved_body, dict)
-                        else None
-                    )
-                    tampered_currency = (
-                        resolved_body.get("client_currency")
-                        if isinstance(resolved_body, dict)
-                        else None
-                    )
+                    persisted_booking_id = booking_data.get("booking_id")
 
                     is_amount_violation = (
                         tampered_amount is not None
@@ -218,7 +317,7 @@ class PricingIntegrityExecutor(ISpecialistExecutor):
                             f"differing from authoritative quote (amount: {self.baseline.amount_minor_units}, "
                             f"currency: {self.baseline.currency})."
                         )
-                        return self._create_candidate_finding(
+                        candidate = self._create_candidate_finding(
                             plan=plan,
                             step=step,
                             response=response,
@@ -227,27 +326,102 @@ class PricingIntegrityExecutor(ISpecialistExecutor):
                             actual_amount=actual_amount,
                             actual_currency=actual_currency,
                         )
+                        manifest = self.build_evidence_manifest(plan, execution_id)
+                        return ExecutorRunResult(
+                            execution_id=execution_id,
+                            plan_id=plan.plan_id,
+                            invariant_id=self.supported_invariant,
+                            outcome=ExecutionOutcome.CANDIDATE,
+                            candidate=candidate,
+                            evidence_manifest=manifest,
+                            completed_steps=completed_steps,
+                            reason=f"Server accepted client values ({actual_amount} {actual_currency}) overriding authoritative quote",
+                            persisted_resource_id=persisted_booking_id,
+                            baseline_summary=baseline_summary,
+                            probe_summary=probe_summary,
+                        )
                     else:
                         logger.info(
                             "Probe returned 200 OK, but persisted booking maintained authoritative quote pricing. "
                             "Invariant held."
                         )
-                        return None
+                        manifest = self.build_evidence_manifest(plan, execution_id)
+                        return ExecutorRunResult(
+                            execution_id=execution_id,
+                            plan_id=plan.plan_id,
+                            invariant_id=self.supported_invariant,
+                            outcome=ExecutionOutcome.EXPECTED_REJECTION,
+                            candidate=None,
+                            evidence_manifest=manifest,
+                            completed_steps=completed_steps,
+                            reason="Probe returned 200 OK but server maintained authoritative quote pricing in booking",
+                            persisted_resource_id=persisted_booking_id,
+                            baseline_summary=baseline_summary,
+                            probe_summary=probe_summary,
+                        )
 
                 elif response.status_code in {400, 422}:
                     logger.info(
                         f"Server correctly rejected price/currency tampering attempt with HTTP {response.status_code}. "
                         "Pricing integrity invariant held."
                     )
-                    return None
+                    manifest = self.build_evidence_manifest(plan, execution_id)
+                    return ExecutorRunResult(
+                        execution_id=execution_id,
+                        plan_id=plan.plan_id,
+                        invariant_id=self.supported_invariant,
+                        outcome=ExecutionOutcome.EXPECTED_REJECTION,
+                        candidate=None,
+                        evidence_manifest=manifest,
+                        completed_steps=completed_steps,
+                        reason=f"Server correctly rejected price/currency tampering with HTTP {response.status_code}",
+                        baseline_summary=baseline_summary,
+                        probe_summary=probe_summary,
+                    )
                 elif response.status_code >= 500:
                     logger.warning(f"Target server returned HTTP {response.status_code}; inconclusive probe.")
-                    return None
+                    manifest = self.build_evidence_manifest(plan, execution_id)
+                    return ExecutorRunResult(
+                        execution_id=execution_id,
+                        plan_id=plan.plan_id,
+                        invariant_id=self.supported_invariant,
+                        outcome=ExecutionOutcome.INCONCLUSIVE,
+                        candidate=None,
+                        evidence_manifest=manifest,
+                        completed_steps=completed_steps,
+                        failed_step=step.step_id,
+                        reason=f"Target server returned HTTP {response.status_code}",
+                        baseline_summary=baseline_summary,
+                        probe_summary=probe_summary,
+                    )
                 else:
                     logger.warning(f"Unexpected probe response status HTTP {response.status_code}; inconclusive.")
-                    return None
+                    manifest = self.build_evidence_manifest(plan, execution_id)
+                    return ExecutorRunResult(
+                        execution_id=execution_id,
+                        plan_id=plan.plan_id,
+                        invariant_id=self.supported_invariant,
+                        outcome=ExecutionOutcome.INCONCLUSIVE,
+                        candidate=None,
+                        evidence_manifest=manifest,
+                        completed_steps=completed_steps,
+                        failed_step=step.step_id,
+                        reason=f"Unexpected probe response status HTTP {response.status_code}",
+                        baseline_summary=baseline_summary,
+                        probe_summary=probe_summary,
+                    )
 
-        return None
+        manifest = self.build_evidence_manifest(plan, execution_id)
+        return ExecutorRunResult(
+            execution_id=execution_id,
+            plan_id=plan.plan_id,
+            invariant_id=self.supported_invariant,
+            outcome=ExecutionOutcome.INCONCLUSIVE,
+            candidate=None,
+            evidence_manifest=manifest,
+            completed_steps=completed_steps,
+            reason="Plan completed without executing probe step",
+        )
 
     def _create_candidate_finding(
         self,

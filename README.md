@@ -11,7 +11,7 @@
 [![Framework](https://img.shields.io/badge/Rust%20API-Axum-7C3AED)](https://github.com/tokio-rs/axum)
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Track](https://img.shields.io/badge/VOYAGEHACK%204.0-Fraud%20Prevention%20%26%20Security-ef8c35)](https://unstop.com/)
-[![Tests](https://img.shields.io/badge/Reported%20tests-216%20passing-2ea44f)](#verification-status)
+[![Tests](https://img.shields.io/badge/Reported%20tests-239%20passing-2ea44f)](#verification-status)
 
 *An application is more than a collection of endpoints. It is a network of identities, bookings, suppliers, payments, and state transitions. Drishti AI tests the rules that hold that network together.*
 
@@ -59,7 +59,9 @@ flowchart TB
         CHANGE[Change intelligence]
         CRAWL[Role-aware browser discovery]
         GRAPH[Travel Security Intelligence Graph]
-        PLANNER[Journey reasoning and test planning - planned]
+        PLANNER[Attack Plan Compiler]
+        EXEC[Specialist Executors - I-01 / I-02]
+        ORACLE[Verification Oracle & Finding Lifecycle]
         HAR --> NORM
         BUNDLE --> NORM
         NORM --> CHANGE
@@ -67,6 +69,8 @@ flowchart TB
         CHANGE --> GRAPH
         NORM --> GRAPH
         GRAPH --> PLANNER
+        PLANNER --> EXEC
+        EXEC --> ORACLE
     end
 
     subgraph GUARD[Rust Security Kernel - drishti-guard]
@@ -182,7 +186,8 @@ Status below reflects the latest development milestone reported by the project t
 | Change detection | **Complete** | Compare versioned inventory, HAR, bundle, schema, and deployment evidence |
 | Role-aware Playwright discovery | **Complete** | Isolated multi-tenant browser contexts with fail-closed NetworkBridge mediation |
 | Travel Security Intelligence Graph | **Complete** | NetworkX MultiDiGraph, typed schema, independent Quote/Hold/Booking/Payment/Refund lifecycles, and invariant binding |
-| Specialist executors and full finding lifecycle | **In progress** | I-01 Tenant Isolation (BOLA) and I-02 Server-Authoritative Pricing (Amount & Currency Tampering) executors implemented with guarded differential verification |
+| Specialist executors (I-01 & I-02) | **Complete** | I-01 Tenant Isolation (BOLA) and I-02 Server-Authoritative Pricing (Amount & Currency Tampering) executors with guarded differential verification |
+| Verification Oracle & Finding Lifecycle | **Complete** | Independent out-of-band read-back, cryptographic manifest validation, transparent rubric scoring, and multi-state lifecycle machine |
 
 ## Repository layout
 
@@ -205,10 +210,21 @@ drishti-ai/
 │   │   ├── change_detector.py
 │   │   ├── crawler.py
 │   │   └── network_bridge.py
-│   └── graph/                       # Travel Security Intelligence Graph
-│       ├── schema.py                # Typed nodes, edges, fact classifications
-│       ├── state_machine.py         # Independent entity lifecycles & transition rules
-│       └── engine.py                # NetworkX MultiDiGraph, invariant binding, attack paths
+│   ├── graph/                       # Travel Security Intelligence Graph
+│   │   ├── schema.py                # Typed nodes, edges, fact classifications
+│   │   ├── state_machine.py         # Independent entity lifecycles & transition rules
+│   │   └── engine.py                # NetworkX MultiDiGraph, invariant binding, attack paths
+│   ├── executors/                   # Specialist Security Executors
+│   │   ├── base.py                  # Guarded executor contract, budgets, deadlines
+│   │   ├── attack_plan.py           # Typed attack plan compiler & canary store
+│   │   ├── i01_tenant_isolation.py  # I-01 BOLA / IDOR executor
+│   │   └── i02_pricing_integrity.py # I-02 Server-authoritative pricing executor
+│   └── verifier/                    # Independent Verification & Lifecycle
+│       ├── models.py                # ExecutionOutcome, EvidenceManifest, RunResult
+│       ├── evidence_validator.py    # Cryptographic digest and negative control validator
+│       ├── oracle.py                # Verification Oracle with independent read-back
+│       ├── finding_manager.py       # Finite state machine & audit transition tracking
+│       └── reproduction.py          # Zero-leakage cURL reproduction recipes
 │
 ├── rust/
 │   ├── Cargo.toml
@@ -293,8 +309,8 @@ Latest reported automated test results:
 | Suite | Reported result |
 |---|---:|
 | Rust workspace | 40 passed |
-| Python suite | 176 passed |
-| **Combined** | **216 passed** |
+| Python suite | 199 passed |
+| **Combined** | **239 passed** |
 
 Run the commands above to reproduce the results in your own checkout. Test counts are a snapshot of the reported milestone and may change as the suite grows.
 
@@ -307,8 +323,8 @@ Run the commands above to reproduce the results in your own checkout. Test count
 - [x] **Change intelligence:** versioned inventory and schema reconciliation; identify security-relevant changes.
 - [x] **Role-aware crawling:** Playwright discovery with guard-mediated network access.
 - [x] **Travel Security Intelligence Graph:** model tenants, identities, endpoints, objects, journeys, independent lifecycles, and invariants.
-- [ ] **Specialist testing:** complete I-01 and I-02 test adapters against the authorized staging target.
-- [ ] **Finding lifecycle:** independent black-box verification, actionable reports, and post-fix retesting.
+- [x] **Specialist testing:** complete I-01 and I-02 test adapters against the authorized staging target.
+- [x] **Finding lifecycle:** independent black-box verification, actionable reports, and post-fix retesting.
 - [ ] **Extended coverage:** reservation concurrency, payment idempotency, zombie/shadow API inventory, and additional invariants.
 
 ## Project principles

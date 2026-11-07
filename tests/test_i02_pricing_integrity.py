@@ -36,8 +36,13 @@ from drishti.executors.i02_pricing_integrity import PricingIntegrityExecutor
 from drishti.graph.schema import HypothesisNode
 from drishti.policy.client import SafeHttpClient
 from drishti.policy.transports import InProcessFixtureTransport
+from drishti.verifier.models import ExecutionOutcome, ExecutorRunResult
+from tests.fixtures.mock_travel_api import create_travel_app
 from tests.fixtures.patched_app import create_patched_app
-from tests.fixtures.vulnerable_app import create_vulnerable_app
+from tests.fixtures.vulnerable_app import (
+    VulnerableTravelService,
+    create_vulnerable_app,
+)
 
 
 @pytest.fixture
@@ -90,10 +95,12 @@ async def test_pricing_executor_finds_amount_tampering_on_vulnerable_app(hypothe
     )
 
     executor = PricingIntegrityExecutor(http_client=http_client)
-    finding = await executor.execute(plan, base_url="http://test")
+    run_res = await executor.execute(plan, base_url="http://test")
 
     # Verify a candidate finding was produced with proof evidence
-    assert finding is not None
+    assert run_res.outcome == ExecutionOutcome.CANDIDATE
+    assert run_res.candidate is not None
+    finding = run_res.candidate
     assert isinstance(finding, CandidateFinding)
     assert not isinstance(finding, VerifiedFinding)
     assert finding.observed_status_code == 200
@@ -125,10 +132,11 @@ async def test_pricing_executor_rejects_amount_tampering_on_patched_app(hypothes
     )
 
     executor = PricingIntegrityExecutor(http_client=http_client)
-    finding = await executor.execute(plan, base_url="http://test")
+    run_res = await executor.execute(plan, base_url="http://test")
 
-    # Invariant holds: Patched app returns HTTP 400 Bad Request; no candidate finding emitted
-    assert finding is None
+    # Invariant holds: Patched app returns HTTP 400 Bad Request; EXPECTED_REJECTION outcome
+    assert run_res.outcome == ExecutionOutcome.EXPECTED_REJECTION
+    assert run_res.candidate is None
     assert len(executor.execution_history) == 5
     probe_exec = executor.execution_history[-1]
     assert probe_exec.status_code == 400
@@ -154,9 +162,11 @@ async def test_pricing_executor_finds_currency_tampering_on_vulnerable_app(hypot
     )
 
     executor = PricingIntegrityExecutor(http_client=http_client)
-    finding = await executor.execute(plan, base_url="http://test")
+    run_res = await executor.execute(plan, base_url="http://test")
 
-    assert finding is not None
+    assert run_res.outcome == ExecutionOutcome.CANDIDATE
+    assert run_res.candidate is not None
+    finding = run_res.candidate
     assert isinstance(finding, CandidateFinding)
     assert finding.observed_status_code == 200
     assert "Currency Tampering" in finding.hypothesis.rationale
@@ -184,15 +194,46 @@ async def test_pricing_executor_rejects_currency_tampering_on_patched_app(hypoth
     )
 
     executor = PricingIntegrityExecutor(http_client=http_client)
-    finding = await executor.execute(plan, base_url="http://test")
+    run_res = await executor.execute(plan, base_url="http://test")
 
-    assert finding is None
+    assert run_res.outcome == ExecutionOutcome.EXPECTED_REJECTION
+    assert run_res.candidate is None
     assert executor.execution_history[-1].status_code == 400
 
 
 @pytest.mark.asyncio
 async def test_pricing_executor_aborts_on_expired_quote(hypothesis_i02):
     """If the authoritative quote is expired, execution aborts and returns None (inconclusive)."""
+    gate = build_mock_policy_gate()
+    service = VulnerableTravelService()
+    # Explicitly set quote expiry to 1 hour in the past
+    service.quotes["QT_GOA_501"].expires_at = time.time() - 3600
+    app = create_travel_app(service)
+    transport = InProcessFixtureTransport(app=app)
+    http_client = SafeHttpClient(policy_gate=gate, transport=transport)
+
+    plan = AttackPlanCompiler.compile_plan(
+        hypothesis=hypothesis_i02,
+        attacker_credential_ref="cred:agency_b:admin",
+        victim_credential_ref="cred:agency_a:admin",
+        fixture_setup_approved=True,
+        synthetic_mutation_approved=True,
+    )
+
+    executor = PricingIntegrityExecutor(http_client=http_client)
+    run_res = await executor.execute(plan, base_url="http://test")
+
+    # Assert expired quote is detected, returns INCONCLUSIVE outcome,
+    # and no hold or booking steps are executed.
+    assert run_res.outcome == ExecutionOutcome.INCONCLUSIVE
+    assert run_res.candidate is None
+    assert len(executor.execution_history) == 1
+    assert executor.baseline is None, "Expired quote must not be stored as an authoritative baseline"
+
+
+@pytest.mark.asyncio
+async def test_pricing_executor_aborts_on_missing_baseline_fields(hypothesis_i02):
+    """If the untampered negative control booking response omits confirmed amount/currency, executor aborts."""
     gate = build_mock_policy_gate()
     app = create_vulnerable_app()
     transport = InProcessFixtureTransport(app=app)
@@ -206,14 +247,18 @@ async def test_pricing_executor_aborts_on_expired_quote(hypothesis_i02):
         synthetic_mutation_approved=True,
     )
 
-    # Intentionally expire quote in execution context output binding
-    executor = PricingIntegrityExecutor(http_client=http_client)
-    # Manually run step 1 and mock expired timestamp
-    executor.execution_context["baseline_expires_at"] = time.time() - 100
+    # Remove confirmed amount output binding from negative control step so context variable remains None
+    plan.steps[2].output_bindings = [
+        b for b in plan.steps[2].output_bindings if b.context_variable != "confirmed_baseline_amount"
+    ]
 
-    finding = await executor.execute(plan, base_url="http://test")
-    # Quote is expired in mock app if reset with past expiry, or verified safely
-    assert finding is not None or finding is None  # Ensures no uncaught exception occurs
+    executor = PricingIntegrityExecutor(http_client=http_client)
+    run_res = await executor.execute(plan, base_url="http://test")
+
+    # Must abort cleanly without dispatching probe
+    assert run_res.outcome == ExecutionOutcome.INCONCLUSIVE
+    assert run_res.candidate is None
+    assert len(executor.execution_history) == 3
 
 
 @pytest.mark.asyncio
@@ -236,10 +281,11 @@ async def test_pricing_executor_aborts_on_failed_negative_control(hypothesis_i02
     plan.steps[2].endpoint_route_template = "/api/v2/non_existent_bookings"
 
     executor = PricingIntegrityExecutor(http_client=http_client)
-    finding = await executor.execute(plan, base_url="http://test")
+    run_res = await executor.execute(plan, base_url="http://test")
 
-    # Negative control failed -> aborts cleanly, no candidate finding
-    assert finding is None
+    # Negative control failed -> aborts cleanly, INCONCLUSIVE outcome
+    assert run_res.outcome == ExecutionOutcome.INCONCLUSIVE
+    assert run_res.candidate is None
     assert len(executor.execution_history) == 3
 
 
@@ -301,8 +347,9 @@ async def test_pricing_executor_handles_5xx_server_error(hypothesis_i02):
 
     executor.send_guarded_request = mock_send
 
-    finding = await executor.execute(plan, base_url="http://test")
-    assert finding is None
+    run_res = await executor.execute(plan, base_url="http://test")
+    assert run_res.outcome == ExecutionOutcome.INCONCLUSIVE
+    assert run_res.candidate is None
 
 
 @pytest.mark.asyncio

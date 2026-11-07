@@ -38,6 +38,12 @@ from drishti.core.models import (
 )
 from drishti.executors.attack_plan import AttackPlan, AttackPlanStep
 from drishti.policy.client import SafeHttpClient
+from drishti.verifier.models import (
+    EvidenceManifest,
+    EvidenceReference,
+    ExecutionOutcome,
+    ExecutorRunResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +118,7 @@ class ISpecialistExecutor(ABC):
         self._cancel_reason: str = ""
         self._execution_start_time: Optional[float] = None
         self.execution_history: List[ExecutionResult] = []
+        self.evidence_references: List[EvidenceReference] = []
         self.execution_context: Dict[str, Any] = {}
 
     def cancel(self, reason: str = "Emergency stop signal received") -> None:
@@ -127,6 +134,7 @@ class ISpecialistExecutor(ABC):
         self._cancel_reason = ""
         self._execution_start_time = None
         self.execution_history.clear()
+        self.evidence_references.clear()
         self.execution_context.clear()
 
     def start_execution(self, plan: AttackPlan) -> None:
@@ -362,13 +370,58 @@ class ISpecialistExecutor(ABC):
             response_digest=raw_digest,
         )
         self.execution_history.append(exec_res)
+
+        # Record point-in-time evidence reference for verification manifest
+        step_bindings = {
+            b.context_variable: self.execution_context.get(b.context_variable)
+            for b in (step.output_bindings or [])
+            if b.context_variable in self.execution_context
+        }
+        evidence_ref = EvidenceReference(
+            request_id=req_id,
+            step_id=step.step_id,
+            phase=step.phase.value if hasattr(step.phase, "value") else str(step.phase),
+            method=step.method.upper(),
+            url=resolved_url,
+            status_code=response.status_code,
+            response_digest=raw_digest,
+            policy_decision_nonce=exec_res.policy_decision_nonce or "",
+            latency_ms=latency_ms,
+            captured_bindings=step_bindings,
+        )
+        self.evidence_references.append(evidence_ref)
+
         return response, exec_res
 
-    @abstractmethod
-    async def execute(self, plan: AttackPlan) -> CandidateFinding:
-        """Executes an attack plan and produces a candidate finding for oracle verification.
+    def build_evidence_manifest(
+        self,
+        plan: AttackPlan,
+        execution_id: str,
+    ) -> EvidenceManifest:
+        """Constructs an EvidenceManifest capturing all execution step digests and bindings."""
+        canary_digest = (
+            plan.canary_spec.canary_value_digest
+            if plan.canary_spec and plan.canary_spec.canary_value_digest
+            else None
+        )
+        raw_payload_hashes = {
+            ref.step_id: ref.response_digest
+            for ref in self.evidence_references
+        }
+        return EvidenceManifest(
+            plan_id=plan.plan_id,
+            execution_id=execution_id,
+            invariant_id=plan.invariant_id,
+            evidence_references=list(self.evidence_references),
+            raw_payload_hashes=raw_payload_hashes,
+            canary_spec_digest=canary_digest,
+        )
 
-        IMPORTANT: Specialist executors must emit CandidateFinding, NEVER a confirmed finding.
+    @abstractmethod
+    async def execute(self, plan: AttackPlan) -> ExecutorRunResult:
+        """Executes an attack plan and produces an ExecutorRunResult for oracle verification.
+
+        IMPORTANT: Specialist executors must emit candidate findings, NEVER a confirmed finding.
         Independent verification is strictly the responsibility of the Verification Oracle.
         """
         pass
