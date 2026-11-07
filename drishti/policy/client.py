@@ -17,10 +17,12 @@ class SafeHttpClient:
     def __init__(
         self,
         policy_gate: PolicyGate,
-        evidence_store: Optional[EvidenceStore] = None
+        evidence_store: Optional[EvidenceStore] = None,
+        transport: Optional[httpx.AsyncBaseTransport] = None
     ):
         self.policy_gate = policy_gate
         self.evidence_store = evidence_store or EvidenceStore()
+        self.transport = transport
 
     async def send_request(
         self,
@@ -58,7 +60,11 @@ class SafeHttpClient:
         start_time = time.monotonic()
         timeout = httpx.Timeout(self.policy_gate.budgets.execution.timeout_seconds)
 
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        client_kwargs: Dict[str, Any] = {"timeout": timeout, "follow_redirects": False}
+        if self.transport is not None:
+            client_kwargs["transport"] = self.transport
+
+        async with httpx.AsyncClient(**client_kwargs) as client:
             try:
                 response = await client.request(
                     method=request.method,
