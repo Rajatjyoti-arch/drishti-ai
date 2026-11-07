@@ -1,8 +1,12 @@
 """End-to-End tests for VerificationOracle, independent read-back, and confidence scoring."""
 
+import hashlib
+from pathlib import Path
+import tempfile
 import pytest
 from unittest.mock import MagicMock
 
+from drishti.audit.ledger import TamperEvidentLedger
 from drishti.core.models import (
     InvariantType,
     PolicyAction,
@@ -24,18 +28,38 @@ from tests.fixtures.vulnerable_app import create_vulnerable_app
 
 def build_mock_policy_gate():
     gate = MagicMock()
-    decision = PolicyDecision(
-        action=PolicyAction.ALLOW,
-        approved=True,
-        reason="Approved for testing",
-        sanitized_url="http://test",
-        budget_remaining=100,
-    )
+    decisions = {}
+    db_file = Path(tempfile.mktemp(suffix=".db"))
+    ledger = TamperEvidentLedger(db_path=db_file)
+    gate.ledger = ledger
 
     async def mock_eval(req, approval_token=None):
-        return decision
+        dec = PolicyDecision(
+            action=PolicyAction.ALLOW,
+            approved=True,
+            reason="Approved for testing",
+            sanitized_url=req.url,
+            budget_remaining=100,
+        )
+        decisions[dec.decision_id] = {
+            "decision_id": dec.decision_id,
+            "request_id": req.request_id,
+            "test_id": req.test_id,
+            "action": "ALLOW",
+            "approved": True,
+            "url": req.url,
+            "method": req.method,
+        }
+        ledger.record_event(
+            event_id=dec.decision_id,
+            event_type="POLICY_ALLOW",
+            payload_digest=hashlib.sha256(f"{req.method}:{req.url}".encode()).hexdigest(),
+            metadata={"request_id": req.request_id, "url": req.url},
+        )
+        return dec
 
     gate.evaluate_request = mock_eval
+    gate.get_decision = lambda did: decisions.get(did)
     gate.budgets.execution.timeout_seconds = 10.0
 
     def mock_get_cred(credential_ref, target_hostname, purpose):

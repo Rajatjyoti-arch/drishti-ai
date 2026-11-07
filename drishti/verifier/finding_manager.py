@@ -72,9 +72,10 @@ class FindingLifecycleManager:
         self._load_from_db()
 
     def _init_db(self) -> None:
-        """Initializes SQLite schema for findings and lifecycle transitions."""
+        """Initializes SQLite schema for findings and lifecycle transitions with foreign key constraints."""
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
+                conn.execute("PRAGMA foreign_keys = ON;")
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS finding_records (
                         finding_id TEXT PRIMARY KEY,
@@ -87,14 +88,16 @@ class FindingLifecycleManager:
                 """)
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS lifecycle_transitions (
-                        transition_id TEXT PRIMARY KEY,
+                        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                        transition_id TEXT UNIQUE NOT NULL,
                         finding_id TEXT NOT NULL,
                         from_state TEXT NOT NULL,
                         to_state TEXT NOT NULL,
                         timestamp TEXT NOT NULL,
                         actor TEXT NOT NULL,
                         reason TEXT NOT NULL,
-                        evidence_ref TEXT
+                        evidence_ref TEXT,
+                        FOREIGN KEY(finding_id) REFERENCES finding_records(finding_id) ON DELETE RESTRICT
                     );
                 """)
                 conn.commit()
@@ -214,40 +217,47 @@ class FindingLifecycleManager:
         actor: str = "VerificationOracle",
         evidence_ref: Optional[str] = None,
     ) -> LifecycleTransition:
-        """Transitions a finding to a new lifecycle state if allowed by the state machine."""
+        """Transitions a finding to a new lifecycle state with transactional SQLite validation."""
+        now = datetime.now(timezone.utc).isoformat()
+        transition = LifecycleTransition(
+            finding_id=finding_id,
+            from_state=new_state,  # Will be adjusted to current_state
+            to_state=new_state,
+            reason=reason,
+            actor=actor,
+            evidence_ref=evidence_ref,
+        )
+
         with self._lock:
-            if finding_id not in self._states:
-                raise KeyError(f"Finding '{finding_id}' is not registered in the lifecycle manager.")
-
-            current_state = self._states[finding_id]
-            allowed = ALLOWED_TRANSITIONS.get(current_state, set())
-
-            if new_state not in allowed:
-                raise ValueError(
-                    f"Invalid lifecycle transition for finding '{finding_id}': "
-                    f"cannot transition from {current_state.value} to {new_state.value}. "
-                    f"Allowed target states: {[s.value for s in allowed]}."
-                )
-
-            now = datetime.now(timezone.utc).isoformat()
-            self._states[finding_id] = new_state
-            transition = LifecycleTransition(
-                finding_id=finding_id,
-                from_state=current_state,
-                to_state=new_state,
-                reason=reason,
-                actor=actor,
-                evidence_ref=evidence_ref,
-            )
-            self._history[finding_id].append(transition)
-
-            # Persist update to SQLite
             with sqlite3.connect(self.db_path) as conn:
-                conn.execute(
+                conn.execute("PRAGMA foreign_keys = ON;")
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT current_state FROM finding_records WHERE finding_id = ?",
+                    (finding_id,)
+                )
+                row = cursor.fetchone()
+                if not row:
+                    raise KeyError(f"Finding '{finding_id}' is not registered in the lifecycle manager.")
+
+                current_state = FindingLifecycleState(row[0])
+                allowed = ALLOWED_TRANSITIONS.get(current_state, set())
+
+                if new_state not in allowed:
+                    raise ValueError(
+                        f"Invalid lifecycle transition for finding '{finding_id}': "
+                        f"cannot transition from {current_state.value} to {new_state.value}. "
+                        f"Allowed target states: {[s.value for s in allowed]}."
+                    )
+
+                transition.from_state = current_state
+
+                # Atomic update and append
+                cursor.execute(
                     "UPDATE finding_records SET current_state = ?, updated_at = ? WHERE finding_id = ?",
                     (new_state.value, now, finding_id),
                 )
-                conn.execute(
+                cursor.execute(
                     """
                     INSERT INTO lifecycle_transitions 
                     (transition_id, finding_id, from_state, to_state, timestamp, actor, reason, evidence_ref)
@@ -265,6 +275,11 @@ class FindingLifecycleManager:
                     ),
                 )
                 conn.commit()
+
+            self._states[finding_id] = new_state
+            if finding_id not in self._history:
+                self._history[finding_id] = []
+            self._history[finding_id].append(transition)
 
         logger.info(
             f"Finding '{finding_id}' transitioned from {current_state.value} to "

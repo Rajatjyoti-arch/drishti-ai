@@ -70,6 +70,12 @@ class BOLAExecutor(ISpecialistExecutor):
         expected_canary_token: Optional[str] = None
         if canary_spec and canary_spec.canary_secret_ref:
             expected_canary_token = CanarySecretStore.get_secret(canary_spec.canary_secret_ref)
+            if expected_canary_token:
+                CanarySecretStore.store_secret(
+                    canary_spec.canary_secret_ref,
+                    expected_canary_token,
+                    execution_id=execution_id,
+                )
 
         # Resolve effective base URL
         effective_base_url = base_url

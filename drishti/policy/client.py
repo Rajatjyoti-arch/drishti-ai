@@ -157,6 +157,17 @@ class SafeHttpClient:
                     body_bytes = b"".join(chunks)
                     resp_headers = dict(stream_resp.headers)
                     resp_headers["x-drishti-decision-nonce"] = decision.decision_id
+                    artifact_id = f"art_{request.request_id}_{decision.decision_id}"
+                    resp_headers["x-drishti-artifact-id"] = artifact_id
+
+                    if hasattr(self.evidence_store, "store_raw_artifact"):
+                        try:
+                            self.evidence_store.store_raw_artifact(artifact_id, body_bytes)
+                            self.evidence_store.store_raw_artifact(f"art_{request.request_id}", body_bytes)
+                            self.evidence_store.store_raw_artifact(request.request_id, body_bytes)
+                        except Exception:
+                            pass
+
                     response = httpx.Response(
                         status_code=stream_resp.status_code,
                         headers=resp_headers,

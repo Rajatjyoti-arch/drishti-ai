@@ -58,6 +58,7 @@ class EvidenceReference(BaseModel):
     status_code: int
     response_digest: str
     policy_decision_nonce: str = ""
+    artifact_id: Optional[str] = None
     latency_ms: int = 0
     captured_bindings: Dict[str, Any] = Field(default_factory=dict)
 

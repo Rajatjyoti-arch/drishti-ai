@@ -37,6 +37,7 @@ class PolicyGate:
         self.health_monitor = HealthMonitor(budgets.circuit_breaker)
         self.credential_broker = credential_broker or CredentialBroker()
         self.approval_manager = HumanApprovalManager()
+        self._decision_records: dict[str, dict] = {}
 
     async def evaluate_request(
         self,
@@ -126,16 +127,55 @@ class PolicyGate:
         return decision
 
     def _record_decision(self, decision: PolicyDecision, request: OutgoingTestRequest) -> None:
-        """Commits the policy evaluation to the tamper-evident ledger."""
+        """Commits the policy evaluation to the tamper-evident ledger and in-memory registry."""
+        meta = {
+            "request_id": request.request_id,
+            "test_id": request.test_id,
+            "url": request.url,
+            "method": request.method,
+            "reason": decision.reason,
+            "budget_remaining": decision.budget_remaining,
+        }
+        self._decision_records[decision.decision_id] = {
+            "decision_id": decision.decision_id,
+            "request_id": request.request_id,
+            "test_id": request.test_id,
+            "action": decision.action.value,
+            "approved": decision.approved,
+            "url": request.url,
+            "method": request.method,
+            "reason": decision.reason,
+            "budget_remaining": decision.budget_remaining,
+        }
         payload_digest = sha256_digest(f"{request.method}:{request.url}:{decision.action.value}")
         self.ledger.record_event(
             event_id=decision.decision_id,
             event_type=f"POLICY_{decision.action.value}",
             payload_digest=payload_digest,
-            metadata={
-                "request_id": request.request_id,
-                "url": request.url,
-                "reason": decision.reason,
-                "budget_remaining": decision.budget_remaining
-            }
+            metadata=meta,
         )
+
+    def get_decision(self, decision_id: str) -> Optional[dict]:
+        """Authoritatively resolves a policy decision by decision_id.
+
+        Checks the active in-memory registry, falling back to the tamper-evident ledger.
+        """
+        if decision_id in self._decision_records:
+            return self._decision_records[decision_id]
+        if self.ledger and hasattr(self.ledger, "get_event_by_id"):
+            ev = self.ledger.get_event_by_id(decision_id)
+            if ev and "metadata" in ev:
+                meta = ev.get("metadata", {})
+                return {
+                    "decision_id": ev["event_id"],
+                    "request_id": meta.get("request_id"),
+                    "test_id": meta.get("test_id"),
+                    "action": ev["event_type"].replace("POLICY_", ""),
+                    "approved": ev["event_type"] == "POLICY_ALLOW",
+                    "url": meta.get("url"),
+                    "method": meta.get("method"),
+                    "reason": meta.get("reason"),
+                    "budget_remaining": meta.get("budget_remaining"),
+                    "timestamp": ev["timestamp"],
+                }
+        return None

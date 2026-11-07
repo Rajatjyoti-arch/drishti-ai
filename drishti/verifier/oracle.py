@@ -48,7 +48,17 @@ class VerificationOracle:
         evidence_validator: Optional[EvidenceValidator] = None,
     ):
         self.http_client = http_client
-        self.evidence_validator = evidence_validator or EvidenceValidator()
+        if evidence_validator is not None:
+            self.evidence_validator = evidence_validator
+        else:
+            pg = getattr(http_client, "policy_gate", None)
+            ledger = getattr(pg, "ledger", None) if pg else None
+            estore = getattr(http_client, "evidence_store", None)
+            self.evidence_validator = EvidenceValidator(
+                evidence_store=estore,
+                ledger=ledger,
+                policy_gate=pg,
+            )
 
     async def verify(
         self,
@@ -68,12 +78,48 @@ class VerificationOracle:
         effective_canary_secret = canary_secret
         if not effective_canary_secret and run_result.evidence_manifest.canary_spec_digest:
             effective_canary_secret = CanarySecretStore.get_secret_by_digest(
-                run_result.evidence_manifest.canary_spec_digest
+                run_result.evidence_manifest.canary_spec_digest,
+                execution_id=run_result.execution_id,
             )
 
         # 1. Non-candidate execution outcomes: validate evidence before accepting defense claims
         if run_result.outcome == ExecutionOutcome.EXPECTED_REJECTION:
-            # P0: Validate manifest BEFORE accepting expected rejection
+            # Check if rejection was caused by Guard / Policy Gate denial rather than target application
+            guard_denial = False
+            for ref in run_result.evidence_manifest.evidence_references:
+                if self.http_client and hasattr(self.http_client, "policy_gate"):
+                    pg = getattr(self.http_client, "policy_gate", None)
+                    if pg and hasattr(pg, "get_decision") and ref.policy_decision_nonce:
+                        dec = pg.get_decision(ref.policy_decision_nonce)
+                        if dec and (dec.get("action") in ("DENY", "STOP", "PAUSE") or not dec.get("approved")):
+                            guard_denial = True
+                            break
+
+            reason_lower = (run_result.reason or "").lower()
+            if guard_denial or any(term in reason_lower for term in ["policy gate", "drishti-guard", "budget exhausted", "denied by policy", "guard denial"]):
+                rationale = f"Probe was rejected by Policy Gate / Guard before reaching target ({run_result.reason}). Target defense unverified."
+                attempt = VerificationAttempt(
+                    status=VerificationStatus.INCONCLUSIVE,
+                    confidence_score=0.0,
+                    confidence_rationale="0.00: Guard-level denial halted execution before target evaluation.",
+                    read_back_performed=False,
+                    read_back_matched=False,
+                    evidence_validation_passed=False,
+                    details={"reason": run_result.reason},
+                )
+                return VerificationResult(
+                    candidate_id=candidate.candidate_id if candidate else "none",
+                    invariant_id=run_result.invariant_id,
+                    status=VerificationStatus.INCONCLUSIVE,
+                    confidence_score=0.0,
+                    confidence_rationale=rationale,
+                    evidence_manifest_id=run_result.evidence_manifest.manifest_id,
+                    attempts=[attempt],
+                    verified_finding=None,
+                    recommended_action="Check policy gate configuration and test budgets.",
+                )
+
+            # P0: Validate manifest BEFORE accepting expected rejection as target defense
             validation_report = self.evidence_validator.validate_manifest(
                 manifest=run_result.evidence_manifest,
                 canary_secret=effective_canary_secret,
@@ -105,11 +151,6 @@ class VerificationOracle:
                     verified_finding=None,
                     recommended_action="Audit execution telemetry and fix evidence integrity before accepting clean defense status.",
                 )
-
-            # Check if rejection was caused by Guard / Policy Gate denial rather than target application
-            reason_lower = (run_result.reason or "").lower()
-            if any(term in reason_lower for term in ["policy gate", "drishti-guard", "budget exhausted", "denied by policy"]):
-                rationale = f"Probe was rejected by Policy Gate / Guard before reaching target ({run_result.reason}). Target defense unverified."
                 attempt = VerificationAttempt(
                     status=VerificationStatus.INCONCLUSIVE,
                     confidence_score=0.0,

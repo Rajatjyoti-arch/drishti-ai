@@ -62,9 +62,11 @@ class EvidenceValidator:
         self,
         evidence_store: Optional[Any] = None,
         ledger: Optional[Any] = None,
+        policy_gate: Optional[Any] = None,
     ):
         self.evidence_store = evidence_store
         self.ledger = ledger
+        self.policy_gate = policy_gate
 
     @class_or_instancemethod
     def validate_manifest(
@@ -151,13 +153,53 @@ class EvidenceValidator:
                 issues.append(f"Step '{ref.step_id}' is missing request_id.")
                 digest_errors += 1
 
-            # Validate policy decision nonce was issued by PolicyGate
+            # Validate policy decision nonce format
             if not ref.policy_decision_nonce or not DECISION_NONCE_REGEX.match(ref.policy_decision_nonce):
                 issues.append(
                     f"Step '{ref.step_id}' contains invalid or missing policy decision nonce: "
                     f"'{ref.policy_decision_nonce}'."
                 )
                 digest_errors += 1
+            else:
+                # Authoritative PolicyGate decision provenance check
+                decision_record = None
+                if self.policy_gate and hasattr(self.policy_gate, "get_decision"):
+                    decision_record = self.policy_gate.get_decision(ref.policy_decision_nonce)
+                elif self.ledger and hasattr(self.ledger, "get_event_by_id"):
+                    ev = self.ledger.get_event_by_id(ref.policy_decision_nonce)
+                    if ev and "metadata" in ev:
+                        m = ev.get("metadata", {})
+                        decision_record = {
+                            "decision_id": ev["event_id"],
+                            "request_id": m.get("request_id"),
+                            "url": m.get("url"),
+                            "action": ev["event_type"].replace("POLICY_", ""),
+                            "approved": ev["event_type"] == "POLICY_ALLOW",
+                        }
+
+                if decision_record is None:
+                    issues.append(
+                        f"Step '{ref.step_id}' policy decision nonce '{ref.policy_decision_nonce}' "
+                        f"was not authenticated by PolicyGate or ledger (fabricated nonce)."
+                    )
+                    digest_errors += 1
+                else:
+                    if decision_record.get("request_id") and decision_record["request_id"] != ref.request_id:
+                        issues.append(
+                            f"Step '{ref.step_id}' nonce '{ref.policy_decision_nonce}' was issued for request "
+                            f"'{decision_record.get('request_id')}', not '{ref.request_id}' (nonce mismatch)."
+                        )
+                        digest_errors += 1
+                    if decision_record.get("url") and decision_record["url"] != ref.url:
+                        issues.append(
+                            f"Step '{ref.step_id}' nonce target '{decision_record.get('url')}' does not match step URL '{ref.url}'."
+                        )
+                        digest_errors += 1
+                    if decision_record.get("action") not in ("ALLOW", "POLICY_ALLOW") and not decision_record.get("approved"):
+                        issues.append(
+                            f"Step '{ref.step_id}' policy decision was denied or not approved (action={decision_record.get('action')})."
+                        )
+                        digest_errors += 1
 
             # Validate response digest format
             if not ref.response_digest or not HEX_64_REGEX.match(ref.response_digest):
@@ -167,17 +209,36 @@ class EvidenceValidator:
                 )
                 digest_errors += 1
 
-            # Recompute digest from raw payload if supplied (detect forged SHA-256)
+            # UNCONDITIONAL Response Artifact & SHA-256 Digest Recomputation
+            raw_bytes: Optional[bytes] = None
             if raw_payloads:
-                raw_body = raw_payloads.get(ref.request_id) or raw_payloads.get(ref.step_id)
-                if raw_body is not None:
-                    recomputed = hashlib.sha256(raw_body.encode("utf-8")).hexdigest()
-                    if recomputed.lower() != ref.response_digest.lower():
-                        issues.append(
-                            f"Step '{ref.step_id}' forged digest: payload SHA-256 ({recomputed}) "
-                            f"does not match declared digest ({ref.response_digest})."
-                        )
-                        digest_errors += 1
+                val = raw_payloads.get(ref.request_id) or raw_payloads.get(ref.step_id)
+                if val is None and getattr(ref, "artifact_id", None):
+                    val = raw_payloads.get(ref.artifact_id)
+                if val is not None:
+                    raw_bytes = val.encode("utf-8") if isinstance(val, str) else val
+
+            if raw_bytes is None and self.evidence_store:
+                art_id = getattr(ref, "artifact_id", None) or f"art_{ref.request_id}"
+                if hasattr(self.evidence_store, "get_raw_artifact"):
+                    raw_bytes = self.evidence_store.get_raw_artifact(art_id)
+                    if raw_bytes is None:
+                        raw_bytes = self.evidence_store.get_raw_artifact(ref.request_id)
+
+            if raw_bytes is None:
+                issues.append(
+                    f"Missing original response artifact for step '{ref.step_id}' "
+                    f"(artifact ID: '{getattr(ref, 'artifact_id', None) or ref.request_id}'). Cannot prove response authenticity."
+                )
+                digest_errors += 1
+            else:
+                recomputed = hashlib.sha256(raw_bytes).hexdigest()
+                if recomputed.lower() != ref.response_digest.lower():
+                    issues.append(
+                        f"Step '{ref.step_id}' forged digest: payload SHA-256 ({recomputed}) "
+                        f"does not match declared digest ({ref.response_digest})."
+                    )
+                    digest_errors += 1
 
             # Check cross-correlation with manifest.raw_payload_hashes if populated
             if manifest.raw_payload_hashes:
@@ -191,22 +252,27 @@ class EvidenceValidator:
                     )
                     digest_errors += 1
 
-        # 4. Audit ledger checkpoint verification
+        # 4. Audit ledger checkpoint verification (FAIL-CLOSED)
         if not manifest.audit_ledger_checkpoint:
             issues.append("Missing required audit ledger checkpoint in evidence manifest.")
             digest_errors += 1
-        elif self.ledger and hasattr(self.ledger, "get_all_events"):
+        elif self.ledger and hasattr(self.ledger, "verify_checkpoint_coverage"):
             try:
-                events = self.ledger.get_all_events()
-                if not events and not manifest.audit_ledger_checkpoint.startswith("chk_"):
+                req_ids = [ref.request_id for ref in manifest.evidence_references if ref.request_id]
+                if not self.ledger.verify_checkpoint_coverage(manifest.audit_ledger_checkpoint, request_ids=req_ids):
                     issues.append(
                         f"Audit ledger checkpoint '{manifest.audit_ledger_checkpoint}' could "
-                        f"not be authenticated against audit ledger."
+                        f"not be authenticated against authoritative ledger chain or does not cover execution requests."
                     )
                     digest_errors += 1
             except Exception as e:
                 issues.append(f"Audit ledger verification error: {e}")
                 digest_errors += 1
+        else:
+            issues.append(
+                f"Audit ledger is not available to authenticate checkpoint '{manifest.audit_ledger_checkpoint}'; failing closed."
+            )
+            digest_errors += 1
 
         if digest_errors == 0:
             digests_verified = True

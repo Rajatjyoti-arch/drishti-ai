@@ -361,10 +361,8 @@ class ISpecialistExecutor(ABC):
         except Exception:
             latency_ms = 0
 
-        decision_nonce = (
-            response.headers.get("x-drishti-decision-nonce")
-            or f"dec_{uuid.uuid4().hex[:12]}"
-        )
+        decision_nonce = response.headers.get("x-drishti-decision-nonce") or ""
+        artifact_id = response.headers.get("x-drishti-artifact-id") or f"art_{req_id}"
 
         exec_res = ExecutionResult(
             request_id=req_id,
@@ -392,6 +390,7 @@ class ISpecialistExecutor(ABC):
             status_code=response.status_code,
             response_digest=raw_digest,
             policy_decision_nonce=decision_nonce,
+            artifact_id=artifact_id,
             latency_ms=latency_ms,
             captured_bindings=step_bindings,
         )
@@ -417,15 +416,13 @@ class ISpecialistExecutor(ABC):
         checkpoint_id = None
         if hasattr(self.http_client, "policy_gate") and hasattr(self.http_client.policy_gate, "ledger"):
             ledger = getattr(self.http_client.policy_gate, "ledger", None)
-            if ledger and hasattr(ledger, "get_all_events"):
+            if ledger and hasattr(ledger, "create_checkpoint"):
                 try:
-                    events = ledger.get_all_events()
-                    if events:
-                        checkpoint_id = f"chk_{events[-1].current_hash[:16]}"
+                    cp = ledger.create_checkpoint(f"chk_{uuid.uuid4().hex[:12]}")
+                    if cp and hasattr(cp, "checkpoint_id") and isinstance(cp.checkpoint_id, str):
+                        checkpoint_id = cp.checkpoint_id
                 except Exception:
-                    pass
-        if not checkpoint_id:
-            checkpoint_id = f"chk_{hashlib.sha256(execution_id.encode('utf-8')).hexdigest()[:16]}"
+                    checkpoint_id = None
 
         return EvidenceManifest(
             plan_id=plan.plan_id,

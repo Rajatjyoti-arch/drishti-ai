@@ -9,6 +9,7 @@ from enum import Enum
 import hashlib
 import re
 import secrets
+import time
 from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -132,29 +133,91 @@ class NegativeControl(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class CanaryRecord(BaseModel):
+    """Protected canary secret entry with execution lifecycle bounds and TTL."""
+    secret_ref: str
+    value: str
+    digest: str
+    execution_id: Optional[str] = None
+    created_at: float
+    expires_at: float
+    revoked: bool = False
+
+
 class CanarySecretStore:
-    """Protected in-memory execution-time store for high-entropy canary secret values."""
-    _store: Dict[str, str] = {}
-    _digest_map: Dict[str, str] = {}
+    """Protected in-memory store for high-entropy canary secret values, scoped by execution lifecycle."""
+    _records: Dict[str, CanaryRecord] = {}
+    _digest_to_ref: Dict[str, str] = {}
 
     @classmethod
-    def store_secret(cls, secret_ref: str, value: str) -> None:
-        cls._store[secret_ref] = value
+    def store_secret(
+        cls,
+        secret_ref: str,
+        value: str,
+        execution_id: Optional[str] = None,
+        ttl_seconds: float = 300.0,
+    ) -> None:
         digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
-        cls._digest_map[digest] = value
+        now = time.time()
+        record = CanaryRecord(
+            secret_ref=secret_ref,
+            value=value,
+            digest=digest,
+            execution_id=execution_id,
+            created_at=now,
+            expires_at=now + ttl_seconds,
+            revoked=False,
+        )
+        cls._records[secret_ref] = record
+        cls._digest_to_ref[digest] = secret_ref
 
     @classmethod
-    def get_secret(cls, secret_ref: str) -> Optional[str]:
-        return cls._store.get(secret_ref)
+    def get_secret(cls, secret_ref: str, execution_id: Optional[str] = None) -> Optional[str]:
+        record = cls._records.get(secret_ref)
+        if not record or record.revoked:
+            return None
+        if time.time() > record.expires_at:
+            return None
+        if execution_id is not None and record.execution_id is not None and record.execution_id != execution_id:
+            return None
+        return record.value
 
     @classmethod
-    def get_secret_by_digest(cls, digest: str) -> Optional[str]:
-        return cls._digest_map.get(digest)
+    def get_secret_by_digest(cls, digest: str, execution_id: Optional[str] = None) -> Optional[str]:
+        secret_ref = cls._digest_to_ref.get(digest)
+        if not secret_ref:
+            return None
+        return cls.get_secret(secret_ref, execution_id=execution_id)
+
+    @classmethod
+    def cleanup_execution(cls, execution_id: str) -> None:
+        """Explicitly purges all canary secrets associated with a completed execution."""
+        refs_to_del = [
+            ref for ref, rec in cls._records.items()
+            if rec.execution_id == execution_id
+        ]
+        for ref in refs_to_del:
+            rec = cls._records.pop(ref, None)
+            if rec:
+                cls._digest_to_ref.pop(rec.digest, None)
+
+    @classmethod
+    def cleanup_expired(cls) -> None:
+        """Purges any expired canary secrets."""
+        now = time.time()
+        refs_to_del = [
+            ref for ref, rec in cls._records.items()
+            if now > rec.expires_at or rec.revoked
+        ]
+        for ref in refs_to_del:
+            rec = cls._records.pop(ref, None)
+            if rec:
+                cls._digest_to_ref.pop(rec.digest, None)
 
     @classmethod
     def clear(cls) -> None:
-        cls._store.clear()
-        cls._digest_map.clear()
+        cls._records.clear()
+        cls._digest_to_ref.clear()
 
 
 class CanarySpec(BaseModel):

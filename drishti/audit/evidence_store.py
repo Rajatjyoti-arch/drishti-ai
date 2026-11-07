@@ -25,6 +25,44 @@ class EvidenceStore:
         self.storage_dir = storage_dir
         self.config = config or EvidenceConfig()
         self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self._memory_artifacts: Dict[str, bytes] = {}
+
+    def store_raw_artifact(
+        self,
+        artifact_id: str,
+        raw_bytes: bytes,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Stores immutable raw response bytes indexed by artifact_id."""
+        if isinstance(raw_bytes, str):
+            raw_bytes = raw_bytes.encode("utf-8")
+        self._memory_artifacts[artifact_id] = raw_bytes
+        artifact_file = self.storage_dir / f"{artifact_id}.bin"
+        try:
+            with open(artifact_file, "wb") as f:
+                f.write(raw_bytes)
+        except Exception:
+            pass
+        return str(artifact_file)
+
+    def get_raw_artifact(self, artifact_id: str) -> Optional[bytes]:
+        """Retrieves immutable raw response bytes by artifact_id."""
+        if artifact_id in self._memory_artifacts:
+            return self._memory_artifacts[artifact_id]
+        artifact_file = self.storage_dir / f"{artifact_id}.bin"
+        if artifact_file.exists():
+            try:
+                with open(artifact_file, "rb") as f:
+                    content = f.read()
+                    self._memory_artifacts[artifact_id] = content
+                    return content
+            except Exception:
+                return None
+        return None
+
+    def has_artifact(self, artifact_id: str) -> bool:
+        """Checks if an artifact exists in memory or on disk."""
+        return artifact_id in self._memory_artifacts or (self.storage_dir / f"{artifact_id}.bin").exists()
 
     def redact(self, text: str) -> str:
         if not self.config.redaction_enabled or not isinstance(text, str):
