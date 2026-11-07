@@ -224,6 +224,7 @@ class AttackPlan(BaseModel):
     negative_controls: List[NegativeControl] = Field(default_factory=list)
     canary_spec: Optional[CanarySpec] = None
     steps: List[PlanStep] = Field(default_factory=list)
+    fixture_setup_approved: bool = False
     synthetic_mutation_approved: bool = False
     expires_at: str
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -251,14 +252,25 @@ class AttackPlan(BaseModel):
                 f"plan victim tenant ({self.victim_tenant_id})."
             )
 
-        # 3. Synthetic mutation approval requirement
-        has_mutation_step = any(
+        # 3a. Synthetic fixture setup approval requirement
+        has_setup_mutation = any(
+            step.phase == PlanPhase.SETUP and step.method in ("POST", "PUT", "PATCH", "DELETE")
+            for step in self.steps
+        )
+        if has_setup_mutation and not self.fixture_setup_approved:
+            raise ValueError(
+                "Plan contains synthetic fixture setup operations (POST/PUT/PATCH/DELETE) but "
+                "fixture_setup_approved is False. Explicit approval is required for fixture setup."
+            )
+
+        # 3b. Security probe mutation approval requirement
+        has_probe_mutation = any(
             step.requires_mutation_approval or (
                 step.phase == PlanPhase.PROBE and step.method in ("POST", "PUT", "PATCH", "DELETE")
             )
             for step in self.steps
         )
-        if has_mutation_step and not self.synthetic_mutation_approved:
+        if has_probe_mutation and not self.synthetic_mutation_approved:
             raise ValueError(
                 "Plan contains mutating probe steps but synthetic_mutation_approved is False. "
                 "Explicit approval is required for synthetic mutations."
@@ -308,6 +320,7 @@ class AttackPlanCompiler:
         attacker_credential_ref: str = "cred:agency_b:admin",
         victim_credential_ref: str = "cred:agency_a:admin",
         budget: Optional[ExecutionBudget] = None,
+        fixture_setup_approved: bool = True,
         synthetic_mutation_approved: bool = False,
         seed: Optional[str] = None,
         ttl_minutes: int = 60,
@@ -335,6 +348,10 @@ class AttackPlanCompiler:
         parsed_ep = ParsedEndpointIdentity.parse(endpoint_id)
         route_template = parsed_ep.route_template
         method = parsed_ep.method
+
+        # Extract dynamic resource identifier parameter from route template (e.g. {booking_id}, {hold_id}, {reservation_id})
+        route_params = re.findall(r"\{([a-zA-Z0-9_]+)\}", route_template)
+        resource_param = route_params[0] if route_params else "booking_id"
 
         # Generate exact canary token and digest
         if inv_type == InvariantType.TENANT_ISOLATION:
@@ -508,7 +525,7 @@ class AttackPlanCompiler:
                     endpoint_route_template=route_template,
                     actor_tenant_id=attacker_tenant,
                     credential_ref=attacker_credential_ref,
-                    parameters={"booking_id": "$victim_booking_id"},
+                    parameters={resource_param: "$victim_booking_id"},
                     expected_status_baseline=403,
                     is_critical=True,
                 ),
@@ -528,6 +545,7 @@ class AttackPlanCompiler:
                 negative_controls=negative_controls,
                 canary_spec=canary_spec,
                 steps=steps,
+                fixture_setup_approved=fixture_setup_approved,
                 synthetic_mutation_approved=synthetic_mutation_approved,
                 expires_at=expires_at,
             )
@@ -623,6 +641,7 @@ class AttackPlanCompiler:
                 negative_controls=negative_controls,
                 canary_spec=None,
                 steps=steps,
+                fixture_setup_approved=fixture_setup_approved,
                 synthetic_mutation_approved=synthetic_mutation_approved,
                 expires_at=expires_at,
             )

@@ -10,6 +10,7 @@ Enforces:
 """
 
 from abc import ABC, abstractmethod
+import asyncio
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -21,7 +22,11 @@ import uuid
 
 import httpx
 
-from drishti.core.exceptions import PolicyViolationError
+from drishti.core.exceptions import (
+    BudgetExhaustedError,
+    ExecutionCancelledError,
+    PolicyViolationError,
+)
 from drishti.core.models import (
     AttackHypothesis,
     CandidateFinding,
@@ -45,16 +50,6 @@ SENSITIVE_HEADER_KEYS = {
     "www-authenticate",
     "x-auth-token",
 }
-
-
-class BudgetExhaustedError(Exception):
-    """Raised when an executor breaches its configured request count, duration, or payload budget."""
-    pass
-
-
-class ExecutionCancelledError(Exception):
-    """Raised when an active security execution is terminated by emergency stop."""
-    pass
 
 
 def sanitize_response_headers(headers: httpx.Headers) -> Dict[str, str]:
@@ -152,7 +147,10 @@ class ISpecialistExecutor(ABC):
             )
 
     def resolve_step_url(self, step: AttackPlanStep, base_url: str = "") -> str:
-        """Resolves route template parameters using step parameters and typed execution context."""
+        """Resolves route template parameters using step parameters and typed execution context.
+
+        Strictly rejects any unresolved placeholders ({...}) before dispatch.
+        """
         url = f"{base_url.rstrip('/')}{step.endpoint_route_template}"
         for param_key, param_val in step.parameters.items():
             if isinstance(param_val, str) and param_val.startswith("$"):
@@ -169,6 +167,13 @@ class ISpecialistExecutor(ABC):
             placeholder = f"{{{param_key}}}"
             if placeholder in url:
                 url = url.replace(placeholder, resolved_val)
+
+        # Strict validation: reject any unresolved placeholders in the URL
+        unresolved = re.findall(r"\{([a-zA-Z0-9_]+)\}", url)
+        if unresolved:
+            raise ValueError(
+                f"Unresolved route placeholders {unresolved} in step '{step.step_id}' URL: '{url}'."
+            )
 
         return url
 
@@ -198,7 +203,8 @@ class ISpecialistExecutor(ABC):
         """Mediates an HTTP test request through the SafeHttpClient and PolicyGate.
 
         Enforces atomic budget reservation, cooperative cancellation checks,
-        duration limits, evidence redaction, and strict zero-fallback policy denial behavior.
+        hard duration deadlines (cancelling in-flight requests), streaming response size bounds,
+        and strict zero-fallback policy denial behavior.
         """
         # Pre-dispatch cancellation check
         if self.is_cancelled:
@@ -206,16 +212,18 @@ class ISpecialistExecutor(ABC):
                 f"Cannot dispatch step '{step.step_id}'; execution cancelled ({self._cancel_reason})."
             )
 
-        # Enforce execution duration deadline
+        # Calculate remaining duration deadline
         now_mono = time.monotonic()
         if self._execution_start_time is None:
             self._execution_start_time = now_mono
-        else:
-            elapsed = now_mono - self._execution_start_time
-            if elapsed > plan.budget.max_duration_seconds:
-                raise BudgetExhaustedError(
-                    f"Execution duration limit exceeded: {elapsed:.2f}s > {plan.budget.max_duration_seconds}s limit."
-                )
+
+        elapsed = now_mono - self._execution_start_time
+        remaining_seconds = plan.budget.max_duration_seconds - elapsed
+
+        if remaining_seconds <= 0:
+            raise BudgetExhaustedError(
+                f"Execution duration limit exceeded: {elapsed:.2f}s >= {plan.budget.max_duration_seconds}s limit."
+            )
 
         # Atomic budget reservation (taking the stricter of plan and executor limit)
         effective_limit = min(
@@ -244,10 +252,22 @@ class ISpecialistExecutor(ABC):
         )
 
         try:
-            response = await self.http_client.send_request(outgoing, approval_token=approval_token)
+            # Wrap in-flight request with remaining deadline timeout
+            response = await asyncio.wait_for(
+                self.http_client.send_request(
+                    outgoing,
+                    approval_token=approval_token,
+                    max_response_size_bytes=plan.budget.max_response_size_bytes,
+                ),
+                timeout=remaining_seconds,
+            )
+        except asyncio.TimeoutError:
+            self.cancel("Execution duration deadline exceeded during in-flight request")
+            raise BudgetExhaustedError(
+                f"In-flight request timed out: exceeded plan duration deadline of {plan.budget.max_duration_seconds}s."
+            )
         except PolicyViolationError as pve:
             logger.error(f"Policy gate denied outbound request for step '{step.step_id}': {pve}")
-            # Strict policy gate contract: never fall back to unmediated sockets
             raise
 
         # Post-dispatch cancellation check

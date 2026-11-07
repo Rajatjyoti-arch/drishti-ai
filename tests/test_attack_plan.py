@@ -264,6 +264,74 @@ def test_synthetic_mutation_approval_enforcement():
         )
 
 
+def test_fixture_setup_approval_enforcement():
+    """Verify that synthetic setup POST/PUT operations strictly require fixture_setup_approved=True."""
+    attacker_cred = CredentialBinding(tenant_id="agency_b", credential_ref="cred:agency_b:admin")
+    victim_cred = CredentialBinding(tenant_id="agency_a", credential_ref="cred:agency_a:admin")
+
+    setup_step = PlanStep(
+        step_id="step_setup_post",
+        name="Provision Canary Booking",
+        phase=PlanPhase.SETUP,
+        method="POST",
+        target_endpoint_identity="travel_api:canonical:POST:/api/v2/bookings",
+        endpoint_route_template="/api/v2/bookings",
+        actor_tenant_id="agency_a",
+        credential_ref="cred:agency_a:admin",
+    )
+
+    # 1. fixture_setup_approved=False raises ValidationError
+    with pytest.raises(ValidationError, match="Explicit approval is required for fixture setup"):
+        AttackPlan(
+            plan_id="PLAN-SETUP-001",
+            hypothesis_id="HYP-SETUP-001",
+            invariant_id=InvariantType.TENANT_ISOLATION,
+            target_endpoint_identity="travel_api:canonical:POST:/api/v2/bookings",
+            attacker_tenant_id="agency_b",
+            victim_tenant_id="agency_a",
+            attacker_credential=attacker_cred,
+            victim_credential=victim_cred,
+            steps=[setup_step],
+            fixture_setup_approved=False,
+            expires_at="2027-01-01T00:00:00Z",
+        )
+
+    # 2. fixture_setup_approved=True succeeds
+    plan = AttackPlan(
+        plan_id="PLAN-SETUP-002",
+        hypothesis_id="HYP-SETUP-002",
+        invariant_id=InvariantType.TENANT_ISOLATION,
+        target_endpoint_identity="travel_api:canonical:POST:/api/v2/bookings",
+        attacker_tenant_id="agency_b",
+        victim_tenant_id="agency_a",
+        attacker_credential=attacker_cred,
+        victim_credential=victim_cred,
+        steps=[setup_step],
+        fixture_setup_approved=True,
+        expires_at="2027-01-01T00:00:00Z",
+    )
+    assert plan.fixture_setup_approved is True
+
+
+def test_dynamic_resource_parameter_extraction_for_non_booking_routes():
+    """Verify that I-01 compiler extracts {hold_id} or {reservation_id} dynamically for probe steps."""
+    hyp_holds = HypothesisNode(
+        node_id="hyp:test_holds",
+        hypothesis_id="HYP-I01-HOLDS-001",
+        invariant_id=InvariantType.TENANT_ISOLATION.value,
+        target_endpoint_identity="travel_api:canonical:GET:/api/v1/holds/{hold_id}",
+        attacker_tenant_id="agency_b",
+        victim_tenant_id="agency_a",
+        rationale="Dynamic hold_id extraction verification",
+    )
+
+    plan_holds = AttackPlanCompiler.compile_plan(hyp_holds, seed="holds_seed")
+    probe_step = plan_holds.steps[4]
+    assert probe_step.endpoint_route_template == "/api/v1/holds/{hold_id}"
+    assert "hold_id" in probe_step.parameters
+    assert probe_step.parameters["hold_id"] == "$victim_booking_id"
+
+
 def test_exact_canary_digest_verification_and_store():
     """Verify that the declared canary digest matches the exact canary value placed in synthetic booking."""
     hyp = HypothesisNode(

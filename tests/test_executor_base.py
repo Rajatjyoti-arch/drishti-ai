@@ -1,5 +1,6 @@
 """Unit and acceptance tests for ISpecialistExecutor base contract, budgets, and safety boundaries."""
 
+import asyncio
 import hashlib
 import json
 import time
@@ -331,6 +332,7 @@ async def test_execution_context_resolution_and_output_binding(mock_safe_http_cl
         attacker_credential=CredentialBinding(tenant_id="agency_b", credential_ref="cred:b:admin"),
         victim_credential=CredentialBinding(tenant_id="agency_a", credential_ref="cred:a:admin"),
         steps=[setup_step, probe_step],
+        fixture_setup_approved=True,
         expires_at="2027-01-01T00:00:00Z",
     )
 
@@ -363,6 +365,85 @@ def test_resolve_step_url_unbound_variable_raises_error(mock_safe_http_client):
 
     with pytest.raises(ValueError, match="Unbound context variable 'unbound_var'"):
         executor.resolve_step_url(probe_step, base_url="http://test.local")
+
+
+def test_resolve_step_url_rejects_unresolved_route_placeholders(mock_safe_http_client):
+    """Verify that any route template placeholder remaining unresolved is strictly rejected before dispatch."""
+    executor = DummyI01Executor(http_client=mock_safe_http_client)
+    probe_step = PlanStep(
+        step_id="step_probe_unresolved",
+        name="Probe Hold",
+        phase=PlanPhase.PROBE,
+        method="GET",
+        target_endpoint_identity="ep:holds",
+        endpoint_route_template="/api/v1/holds/{hold_id}",
+        actor_tenant_id="agency_b",
+        credential_ref="cred:b:admin",
+        parameters={"other_param": "val"},  # hold_id is missing!
+    )
+
+    with pytest.raises(ValueError, match=r"Unresolved route placeholders \['hold_id'\]"):
+        executor.resolve_step_url(probe_step, base_url="http://test.local")
+
+
+def test_safe_http_client_prohibits_direct_python_network_transport():
+    """Verify that SafeHttpClient strictly prohibits raw httpx.AsyncHTTPTransport and requires authorized transports."""
+    gate = MagicMock()
+    # 1. Raw direct Python network transport -> strictly rejected
+    with pytest.raises(RuntimeError, match="Direct Python network transport is prohibited"):
+        SafeHttpClient(policy_gate=gate, transport=httpx.AsyncHTTPTransport())
+
+    # 2. None -> defaults to RustGuardTransport
+    client_default = SafeHttpClient(policy_gate=gate, transport=None)
+    from drishti.policy.transports import RustGuardTransport, InProcessFixtureTransport
+    assert isinstance(client_default.transport, RustGuardTransport)
+
+    # 3. InProcessFixtureTransport -> accepted
+    async def dummy_app(scope, receive, send):
+        pass
+    client_fixture = SafeHttpClient(policy_gate=gate, transport=InProcessFixtureTransport(app=dummy_app))
+    assert isinstance(client_fixture.transport, InProcessFixtureTransport)
+
+
+@pytest.mark.asyncio
+async def test_inflight_request_duration_deadline_cancellation(mock_safe_http_client):
+    """Verify that a request exceeding remaining plan duration in flight is cancelled immediately."""
+    async def slow_send_request(*args, **kwargs):
+        await asyncio.sleep(2.0)
+        return httpx.Response(200)
+
+    mock_safe_http_client.send_request = slow_send_request
+    executor = DummyI01Executor(http_client=mock_safe_http_client)
+
+    step = PlanStep(
+        step_id="step_slow",
+        name="Slow Inflight Step",
+        phase=PlanPhase.PROBE,
+        method="GET",
+        target_endpoint_identity="ep:1",
+        endpoint_route_template="/slow",
+        actor_tenant_id="agency_b",
+        credential_ref="cred:b:admin",
+    )
+    plan = AttackPlan(
+        plan_id="PLAN-TIMEOUT",
+        hypothesis_id="HYP-TIMEOUT",
+        invariant_id=InvariantType.TENANT_ISOLATION,
+        target_endpoint_identity="ep:1",
+        attacker_tenant_id="agency_b",
+        victim_tenant_id="agency_a",
+        attacker_credential=CredentialBinding(tenant_id="agency_b", credential_ref="cred:b:admin"),
+        victim_credential=CredentialBinding(tenant_id="agency_a", credential_ref="cred:a:admin"),
+        budget=ExecutionBudget(max_requests=5, max_duration_seconds=1),  # 1 second duration
+        steps=[step],
+        expires_at="2027-01-01T00:00:00Z",
+    )
+
+    with pytest.raises(BudgetExhaustedError, match="In-flight request timed out"):
+        await executor.send_guarded_request(plan, step, "http://test.local/slow")
+
+    # Executor was cancelled by deadline
+    assert executor.is_cancelled is True
 
 
 @pytest.mark.asyncio

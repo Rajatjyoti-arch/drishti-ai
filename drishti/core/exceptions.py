@@ -15,3 +15,11 @@ class OutOfScopeError(PolicyViolationError):
 class EmergencyStopTriggered(DrishtiError):
     """Raised when health thresholds are breached and testing is halted immediately."""
     pass
+
+class BudgetExhaustedError(DrishtiError):
+    """Raised when an executor breaches its configured request count, duration, or payload budget."""
+    pass
+
+class ExecutionCancelledError(DrishtiError):
+    """Raised when an active security execution is terminated by emergency stop."""
+    pass

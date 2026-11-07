@@ -11,7 +11,7 @@
 [![Framework](https://img.shields.io/badge/Rust%20API-Axum-7C3AED)](https://github.com/tokio-rs/axum)
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Track](https://img.shields.io/badge/VOYAGEHACK%204.0-Fraud%20Prevention%20%26%20Security-ef8c35)](https://unstop.com/)
-[![Tests](https://img.shields.io/badge/Reported%20tests-192%20passing-2ea44f)](#verification-status)
+[![Tests](https://img.shields.io/badge/Reported%20tests-197%20passing-2ea44f)](#verification-status)
 
 *An application is more than a collection of endpoints. It is a network of identities, bookings, suppliers, payments, and state transitions. Drishti AI tests the rules that hold that network together.*
 
@@ -293,8 +293,8 @@ Latest reported automated test results:
 | Suite | Reported result |
 |---|---:|
 | Rust workspace | 40 passed |
-| Python suite | 152 passed |
-| **Combined** | **192 passed** |
+| Python suite | 157 passed |
+| **Combined** | **197 passed** |
 
 Run the commands above to reproduce the results in your own checkout. Test counts are a snapshot of the reported milestone and may change as the suite grows.
 
