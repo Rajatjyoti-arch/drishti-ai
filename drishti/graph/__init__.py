@@ -36,8 +36,10 @@ from drishti.graph.state_machine import (
     validate_transition,
     validate_refund_bounds,
 )
+from drishti.graph.engine import TravelSecurityGraph
 
 __all__ = [
+    "TravelSecurityGraph",
     "EdgeType",
     "EvidenceSourceType",
     "FactClassification",
