@@ -8,6 +8,7 @@ Implements BOLAExecutor verifying multi-tenant object access boundaries:
 5. Detects canary token disclosure and emits CandidateFinding for independent oracle verification.
 """
 
+import hashlib
 import logging
 from typing import Any, Dict, Optional
 import uuid
@@ -60,8 +61,7 @@ class BOLAExecutor(ISpecialistExecutor):
         IMPORTANT: Emits CandidateFinding only, NEVER a confirmed finding.
         Final verification and lifecycle transitions are strictly owned by the Verification Oracle.
         """
-        self.check_plan_supported(plan)
-        self.check_preconditions(plan)
+        self.start_execution(plan)
 
         canary_spec = plan.canary_spec
         expected_canary_token: Optional[str] = None
@@ -126,11 +126,15 @@ class BOLAExecutor(ISpecialistExecutor):
                 if response.status_code == 200:
                     disclosed = False
                     if expected_canary_token and expected_canary_token in response.text:
-                        disclosed = True
-                    elif canary_spec and canary_spec.canary_id in response.text:
-                        disclosed = True
-                    elif "CANARY_" in response.text:
-                        disclosed = True
+                        # Exact canary digest verification
+                        computed_digest = hashlib.sha256(expected_canary_token.encode("utf-8")).hexdigest()
+                        if not canary_spec or not canary_spec.canary_value_digest or computed_digest == canary_spec.canary_value_digest:
+                            disclosed = True
+                        else:
+                            logger.warning(
+                                f"Canary token found in response, but computed digest {computed_digest} "
+                                f"did not match canary_spec.canary_value_digest ({canary_spec.canary_value_digest})."
+                            )
 
                     if disclosed:
                         logger.info(
@@ -145,7 +149,8 @@ class BOLAExecutor(ISpecialistExecutor):
                         )
                     else:
                         logger.info(
-                            f"Cross-tenant probe returned 200 OK, but canary token was not observed in response."
+                            f"Cross-tenant probe returned 200 OK, but exact planned canary value "
+                            f"was not disclosed in the response payload."
                         )
                         return None
                 elif response.status_code in {401, 403, 404}:

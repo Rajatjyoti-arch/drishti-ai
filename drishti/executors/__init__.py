@@ -27,6 +27,11 @@ from drishti.executors.base import (
     redact_and_bound_evidence,
     sanitize_response_headers,
 )
+from drishti.executors.i01_tenant_isolation import BOLAExecutor
+from drishti.executors.i02_pricing_integrity import (
+    PricingBaseline,
+    PricingIntegrityExecutor,
+)
 
 __all__ = [
     "AttackPlan",
@@ -47,4 +52,7 @@ __all__ = [
     "ISpecialistExecutor",
     "redact_and_bound_evidence",
     "sanitize_response_headers",
+    "BOLAExecutor",
+    "PricingBaseline",
+    "PricingIntegrityExecutor",
 ]

@@ -324,6 +324,9 @@ class AttackPlanCompiler:
         synthetic_mutation_approved: bool = False,
         seed: Optional[str] = None,
         ttl_minutes: int = 60,
+        tampering_mode: str = "amount",
+        tampered_amount_minor_units: int = 100,
+        tampered_currency: str = "IDR",
     ) -> AttackPlan:
         """Compiles a fully validated AttackPlan with typed endpoint parsing and exact canary digests."""
         # Normalize hypothesis fields
@@ -553,16 +556,22 @@ class AttackPlanCompiler:
         elif inv_type == InvariantType.PRICING_INTEGRITY:
             preconditions = [
                 PlanPrecondition(
-                    precondition_id=f"prec_{plan_hash[:6]}_authoritative_quote",
-                    description="Authoritative quote must be fetched from pricing service.",
-                    target_entity="quote:QT_BASELINE",
-                    required_state="QUOTED",
+                    precondition_id=f"prec_{plan_hash[:6]}_search_endpoint",
+                    description="Pricing search endpoint must be registered in inventory.",
+                    target_entity="travel_api:canonical:POST:/api/v2/search",
+                    required_state="REGISTERED",
                 ),
                 PlanPrecondition(
-                    precondition_id=f"prec_{plan_hash[:6]}_hold_acquired",
-                    description="Inventory hold must be acquired and unexpired.",
-                    target_entity="hold:HLD_BASELINE",
-                    required_state="HELD",
+                    precondition_id=f"prec_{plan_hash[:6]}_holds_endpoint",
+                    description="Inventory hold endpoint must be registered in inventory.",
+                    target_entity="travel_api:canonical:POST:/api/v2/holds",
+                    required_state="REGISTERED",
+                ),
+                PlanPrecondition(
+                    precondition_id=f"prec_{plan_hash[:6]}_bookings_endpoint",
+                    description="Booking creation endpoint must be registered in inventory.",
+                    target_entity="travel_api:canonical:POST:/api/v2/bookings",
+                    required_state="REGISTERED",
                 ),
             ]
 
@@ -573,54 +582,121 @@ class AttackPlanCompiler:
                     actor_tenant_id=attacker_tenant,
                     credential_ref=attacker_credential_ref,
                     expected_status_code=200,
-                    assertion_rule="Server-authoritative quote price must be accepted.",
+                    assertion_rule="Server-authoritative quote price must be accepted without tampering.",
                 )
             ]
 
+            probe_body = (
+                {
+                    "hold_token": "$tamper_hold_token",
+                    "client_amount_minor_units": 1800000,
+                    "client_currency": tampered_currency,
+                    "passenger_name": "Currency Tamperer",
+                    "passenger_passport": "P1234567",
+                }
+                if tampering_mode == "currency"
+                else {
+                    "hold_token": "$tamper_hold_token",
+                    "client_amount_minor_units": tampered_amount_minor_units,
+                    "client_currency": "INR",
+                    "passenger_name": "Price Tamperer",
+                    "passenger_passport": "P1234567",
+                }
+            )
+
             steps = [
+                # Step 1: Discover Authoritative Server Quote via Search
                 PlanStep(
-                    step_id="step_1_acquire_hold",
-                    name="Acquire Server Inventory Hold",
+                    step_id="step_1_search_quote",
+                    name="Query Authoritative Quotes via Search",
+                    phase=PlanPhase.SETUP,
+                    method="POST",
+                    target_endpoint_identity="travel_api:canonical:POST:/api/v2/search",
+                    endpoint_route_template="/api/v2/search",
+                    actor_tenant_id=attacker_tenant,
+                    credential_ref=attacker_credential_ref,
+                    body={"destination": "GOA", "check_in": "2026-12-01", "nights": 2},
+                    expected_status_baseline=200,
+                    is_critical=True,
+                    output_bindings=[
+                        OutputBinding(source_field="quote_id", context_variable="baseline_quote_id"),
+                        OutputBinding(source_field="amount_minor_units", context_variable="baseline_amount"),
+                        OutputBinding(source_field="currency", context_variable="baseline_currency"),
+                        OutputBinding(source_field="expires_at", context_variable="baseline_expires_at"),
+                    ],
+                ),
+                # Step 2: Acquire Baseline Inventory Hold
+                PlanStep(
+                    step_id="step_2_acquire_baseline_hold",
+                    name="Acquire Baseline Inventory Hold",
                     phase=PlanPhase.SETUP,
                     method="POST",
                     target_endpoint_identity="travel_api:canonical:POST:/api/v2/holds",
                     endpoint_route_template="/api/v2/holds",
                     actor_tenant_id=attacker_tenant,
                     credential_ref=attacker_credential_ref,
-                    body={"quote_id": "QT_GOA_501"},
+                    parameters={"quote_id": "$baseline_quote_id"},
+                    body={"quote_id": "$baseline_quote_id"},
                     expected_status_baseline=200,
                     is_critical=True,
                     output_bindings=[
-                        OutputBinding(source_field="hold_id", context_variable="acquired_hold_id")
+                        OutputBinding(source_field="hold_token", context_variable="baseline_hold_token")
                     ],
                 ),
+                # Step 3: Verify Untampered Baseline Booking (Negative Control)
                 PlanStep(
-                    step_id="step_2_negative_control_quote_verification",
-                    name="Verify Quote Baseline Parameters",
+                    step_id="step_3_negative_control_untampered_booking",
+                    name="Verify Untampered Authoritative Booking",
                     phase=PlanPhase.NEGATIVE_CONTROL,
-                    method="GET",
-                    target_endpoint_identity="travel_api:canonical:GET:/api/v2/quotes/{quote_id}",
-                    endpoint_route_template="/api/v2/quotes/{quote_id}",
+                    method="POST",
+                    target_endpoint_identity="travel_api:canonical:POST:/api/v2/bookings",
+                    endpoint_route_template="/api/v2/bookings",
                     actor_tenant_id=attacker_tenant,
                     credential_ref=attacker_credential_ref,
-                    parameters={"quote_id": "QT_GOA_501"},
+                    parameters={"hold_token": "$baseline_hold_token"},
+                    body={
+                        "hold_token": "$baseline_hold_token",
+                        "passenger_name": "Legitimate Price Verifier",
+                        "passenger_passport": "P1234567",
+                    },
                     expected_status_baseline=200,
                     is_critical=True,
+                    output_bindings=[
+                        OutputBinding(source_field="booking_id", context_variable="baseline_booking_id"),
+                        OutputBinding(source_field="amount_minor_units", context_variable="confirmed_baseline_amount"),
+                        OutputBinding(source_field="currency", context_variable="confirmed_baseline_currency"),
+                    ],
                 ),
+                # Step 4: Acquire Fresh Hold for Tamper Probe (Prevents Reused Hold Tokens)
                 PlanStep(
-                    step_id="step_3_price_tampering_probe",
-                    name="Execute Client-Controlled Minor Units Tampering Probe",
+                    step_id="step_4_acquire_tamper_hold",
+                    name="Acquire Fresh Inventory Hold for Tampering Probe",
+                    phase=PlanPhase.SETUP,
+                    method="POST",
+                    target_endpoint_identity="travel_api:canonical:POST:/api/v2/holds",
+                    endpoint_route_template="/api/v2/holds",
+                    actor_tenant_id=attacker_tenant,
+                    credential_ref=attacker_credential_ref,
+                    parameters={"quote_id": "$baseline_quote_id"},
+                    body={"quote_id": "$baseline_quote_id"},
+                    expected_status_baseline=200,
+                    is_critical=True,
+                    output_bindings=[
+                        OutputBinding(source_field="hold_token", context_variable="tamper_hold_token")
+                    ],
+                ),
+                # Step 5: Execute Client Pricing/Currency Tampering Probe
+                PlanStep(
+                    step_id="step_5_price_tampering_probe",
+                    name=f"Execute Client-Controlled {tampering_mode.title()} Tampering Probe",
                     phase=PlanPhase.PROBE,
                     method="POST",
                     target_endpoint_identity=endpoint_id,
                     endpoint_route_template=route_template,
                     actor_tenant_id=attacker_tenant,
                     credential_ref=attacker_credential_ref,
-                    body={
-                        "client_amount_minor_units": 100,  # 1 INR tampering attempt
-                        "client_currency": "INR",
-                        "passenger_name": "Budget Explorer",
-                    },
+                    parameters={"hold_token": "$tamper_hold_token"},
+                    body=probe_body,
                     expected_status_baseline=400,
                     requires_mutation_approval=True,
                     is_critical=True,

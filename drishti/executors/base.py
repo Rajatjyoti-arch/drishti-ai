@@ -129,6 +129,20 @@ class ISpecialistExecutor(ABC):
         self.execution_history.clear()
         self.execution_context.clear()
 
+    def start_execution(self, plan: AttackPlan) -> None:
+        """Initializes isolated per-execution state and validates plan contracts."""
+        was_cancelled = self.is_cancelled
+        cancel_reason = self._cancel_reason
+        self.reset()
+        if was_cancelled:
+            self.is_cancelled = True
+            self._cancel_reason = cancel_reason
+            raise ExecutionCancelledError(
+                f"Cannot start execution; already cancelled ({cancel_reason})."
+            )
+        self.check_plan_supported(plan)
+        self.check_preconditions(plan)
+
     def check_plan_supported(self, plan: AttackPlan) -> None:
         """Verifies that the attack plan matches the executor's supported invariant."""
         if plan.invariant_id != self.supported_invariant:
@@ -177,18 +191,57 @@ class ISpecialistExecutor(ABC):
 
         return url
 
+    def resolve_step_body(self, step: AttackPlanStep) -> Any:
+        """Recursively resolves dynamic context variables ($variable_name) inside the step request body."""
+        if step.body is None:
+            return None
+
+        def _substitute(val: Any) -> Any:
+            if isinstance(val, str) and val.startswith("$"):
+                var_name = val[1:]
+                if var_name in self.execution_context:
+                    return self.execution_context[var_name]
+                return val
+            elif isinstance(val, dict):
+                return {k: _substitute(v) for k, v in val.items()}
+            elif isinstance(val, list):
+                return [_substitute(item) for item in val]
+            return val
+
+        return _substitute(step.body)
+
     def capture_step_outputs(self, step: AttackPlanStep, response: httpx.Response) -> None:
-        """Extracts declared output bindings from JSON response into typed execution context."""
+        """Extracts declared output bindings from JSON response into typed execution context.
+
+        Supports both dictionary responses and array responses (e.g. search operations returning quote lists).
+        """
         if not step.output_bindings:
             return
 
         try:
             json_data = response.json()
-            if isinstance(json_data, dict):
-                for binding in step.output_bindings:
+            for binding in step.output_bindings:
+                val = None
+                if isinstance(json_data, dict):
                     val = json_data.get(binding.source_field, binding.default_value)
-                    if val is not None:
-                        self.execution_context[binding.context_variable] = str(val)
+                elif isinstance(json_data, list) and len(json_data) > 0:
+                    src = binding.source_field
+                    idx = 0
+                    field_name = src
+                    if src.startswith("[") and "]" in src:
+                        parts = src[1:].split("]", 1)
+                        try:
+                            idx = int(parts[0])
+                            field_name = parts[1].lstrip(".")
+                        except ValueError:
+                            pass
+                    if 0 <= idx < len(json_data) and isinstance(json_data[idx], dict):
+                        val = json_data[idx].get(field_name, binding.default_value)
+                    elif field_name == "self" or not field_name:
+                        val = json_data[idx]
+
+                if val is not None:
+                    self.execution_context[binding.context_variable] = val
         except Exception as e:
             logger.debug(f"Failed to extract JSON output bindings for step '{step.step_id}': {e}")
 
@@ -244,7 +297,7 @@ class ISpecialistExecutor(ABC):
             method=step.method.upper(),
             url=resolved_url,
             headers=dict(step.headers),
-            body=resolved_body if resolved_body is not None else step.body,
+            body=resolved_body if resolved_body is not None else self.resolve_step_body(step),
             target_tenant_id=step.actor_tenant_id,
             target_invariant=plan.invariant_id,
             credential_ref=step.credential_ref,
