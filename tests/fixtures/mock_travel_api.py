@@ -57,9 +57,9 @@ class Hold(BaseModel):
     expires_at: float
 
 class BookingRequest(BaseModel):
-    hold_token: str
+    hold_token: Optional[str] = None
     passenger_name: str
-    passenger_passport: str
+    passenger_passport: Optional[str] = "P1234567"
     # Client may attempt to supply overridden price/currency
     client_amount_minor_units: Optional[int] = None
     client_currency: Optional[str] = None

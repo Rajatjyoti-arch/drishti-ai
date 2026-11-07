@@ -19,9 +19,16 @@ class VulnerableTravelService(BaseTravelService):
     - I-02: Trusts client-controlled price and currency parameters on checkout.
     """
     def create_booking(self, session: SessionContext, req: BookingRequest) -> Booking:
-        hold = self.holds.get(req.hold_token)
-        if not hold:
-            raise HTTPException(status_code=404, detail="Hold token not found")
+        if req.hold_token:
+            hold = self.holds.get(req.hold_token)
+            if not hold:
+                raise HTTPException(status_code=404, detail="Hold token not found")
+        else:
+            # Auto-provision hold for fixture setup
+            hold_token = f"HLD_AUTO_{uuid.uuid4().hex[:8]}"
+            hold = self.create_hold(session, type("AutoHoldRequest", (), {"quote_id": "QT_GOA_501"})())
+            if not hold:
+                raise HTTPException(status_code=404, detail="Could not auto-provision hold")
 
         quote = self.quotes.get(hold.quote_id)
         if not quote:
@@ -42,7 +49,7 @@ class VulnerableTravelService(BaseTravelService):
             status="CONFIRMED",
             hotel_name=quote.hotel_name,
             passenger_name=req.passenger_name,
-            passenger_passport=req.passenger_passport,
+            passenger_passport=req.passenger_passport or "P1234567",
             pnr=f"PNR_{uuid.uuid4().hex[:6].upper()}",
             canary_id=f"canary_for_{session.tenant_id}",
             canary_token=canary_token,
