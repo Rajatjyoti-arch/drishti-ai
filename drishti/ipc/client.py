@@ -11,7 +11,35 @@ from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Optional
 
 from drishti.core.exceptions import PolicyViolationError
-from drishti.core.models import ExecutionResult, OutgoingTestRequest
+from drishti.core.models import ExecutionResult, InvariantType, OutgoingTestRequest
+
+# Strict IPC protocol boundaries
+MAX_IPC_FRAME_BYTES = 1024 * 1024  # 1 Megabyte maximum frame limit
+DEFAULT_IPC_TIMEOUT_SECONDS = 10.0
+
+INVARIANT_WIRE_MAP: Dict[Any, str] = {
+    InvariantType.TENANT_ISOLATION: "I-01",
+    InvariantType.PRICING_INTEGRITY: "I-02",
+    InvariantType.HOLD_EXPIRATION: "I-03",
+    InvariantType.REFUND_IDEMPOTENCY: "I-04",
+    "I-01-TENANT-ISOLATION": "I-01",
+    "I-02-SERVER-AUTHORITATIVE-PRICING": "I-02",
+    "I-03-PERISHABLE-HOLD-EXPIRATION": "I-03",
+    "I-04-REFUND-BOUNDS-IDEMPOTENCY": "I-04",
+    "I-01": "I-01",
+    "I-02": "I-02",
+    "I-03": "I-03",
+    "I-04": "I-04",
+}
+
+SENSITIVE_AUTH_HEADERS = {
+    "authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "api-key",
+    "proxy-authorization",
+}
 
 
 class GuardIpcError(Exception):
@@ -28,19 +56,35 @@ class RustGuardClient:
     CURRENT_VERSION = "1.0"
     DEFAULT_SOCKET_PATH = "/run/drishti/guard.sock"
 
-    def __init__(self, socket_path: Optional[str] = None):
+    def __init__(
+        self,
+        socket_path: Optional[str] = None,
+        timeout_seconds: float = DEFAULT_IPC_TIMEOUT_SECONDS,
+    ):
         self.socket_path = (
             socket_path
             or os.environ.get("DRISHTI_GUARD_SOCK")
             or self.DEFAULT_SOCKET_PATH
         )
+        self.timeout_seconds = timeout_seconds
 
-    def execute_request(self, request: OutgoingTestRequest) -> ExecutionResult:
+    def execute_request(
+        self,
+        request: OutgoingTestRequest,
+        timeout_seconds: Optional[float] = None,
+    ) -> ExecutionResult:
         """Transmits an OutgoingTestRequest to the Rust Guard and returns ExecutionResult.
 
+        Enforces:
+        1. Exhaustive invariant wire mapping (I-01 to I-04, rejects unknown).
+        2. Absolute secret scrubbing: raw authorization headers are never transmitted over IPC.
+        3. End-to-end response frame ceilings (1MB max).
+        4. Socket read and write timeouts.
+
         Raises:
-            GuardIpcError: If the socket connection fails or the payload is invalid.
+            GuardIpcError: If the socket connection fails, times out, or response is oversized.
             PolicyViolationError: If the Rust PolicyGate blocks or throttles the request.
+            ValueError: If an unknown invariant is supplied.
         """
         if not os.path.exists(self.socket_path):
             raise GuardIpcError(
@@ -60,9 +104,26 @@ class RustGuardClient:
         # Normalize field names to match canonical Rust OutgoingTestRequest schema
         if "url" in req_dict and "target_url" not in req_dict:
             req_dict["target_url"] = req_dict.pop("url")
-        if "target_invariant" in req_dict and "invariant_candidate" not in req_dict:
-            inv = str(req_dict.pop("target_invariant"))
-            req_dict["invariant_candidate"] = "I-01" if "01" in inv else "I-02"
+
+        # Map invariant to Rust wire contract using exhaustive mapping
+        inv_key = req_dict.pop("target_invariant", None) or req_dict.get("invariant_candidate")
+        if inv_key is not None:
+            if inv_key in INVARIANT_WIRE_MAP:
+                req_dict["invariant_candidate"] = INVARIANT_WIRE_MAP[inv_key]
+            else:
+                raise ValueError(
+                    f"Unknown or unsupported invariant wire representation: '{inv_key}'. "
+                    f"Must be one of {list(INVARIANT_WIRE_MAP.keys())}."
+                )
+
+        # Scrub raw credentials: secrets must NEVER cross the IPC boundary from Python into Rust.
+        # Rust Guard resolves credentials internally via its own credential broker.
+        if "headers" in req_dict and isinstance(req_dict["headers"], dict):
+            req_dict["headers"] = {
+                k: v
+                for k, v in req_dict["headers"].items()
+                if k.lower() not in SENSITIVE_AUTH_HEADERS
+            }
 
         # Remove keys with None values to maintain clean canonical JSON
         req_dict = {k: v for k, v in req_dict.items() if v is not None}
@@ -74,18 +135,31 @@ class RustGuardClient:
 
         serialized = json.dumps(payload) + "\n"
 
+        # Determine effective socket timeout (respecting request budget if specified)
+        effective_timeout = timeout_seconds or (
+            req_dict.get("timeout_ms", 0) / 1000.0 if req_dict.get("timeout_ms") else self.timeout_seconds
+        )
+        if effective_timeout <= 0:
+            effective_timeout = self.timeout_seconds
+
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(effective_timeout)
         try:
             sock.connect(self.socket_path)
             sock.sendall(serialized.encode("utf-8"))
 
-            # Read response frame
+            # Read response frame bounded by MAX_IPC_FRAME_BYTES
             response_data = b""
             while b"\n" not in response_data:
                 chunk = sock.recv(4096)
                 if not chunk:
                     break
                 response_data += chunk
+                if len(response_data) > MAX_IPC_FRAME_BYTES:
+                    raise GuardIpcError(
+                        f"IPC response frame exceeded maximum permitted limit ({MAX_IPC_FRAME_BYTES} bytes)",
+                        error_code="RESPONSE_TOO_LARGE",
+                    )
 
             if not response_data:
                 raise GuardIpcError("Empty response from Rust Guard socket", "EMPTY_RESPONSE")
@@ -110,7 +184,12 @@ class RustGuardClient:
                 message = resp_json.get("message", "Policy violation")
                 raise PolicyViolationError(f"[{error_code}] {message}")
 
+        except socket.timeout as e:
+            raise GuardIpcError(
+                f"IPC request timed out after {effective_timeout:.2f}s: {e}",
+                error_code="TIMEOUT",
+            ) from e
         except socket.error as e:
-            raise GuardIpcError(f"Socket I/O error connecting to Rust Guard: {e}", "SOCKET_IO")
+            raise GuardIpcError(f"Socket I/O error connecting to Rust Guard: {e}", "SOCKET_IO") from e
         finally:
             sock.close()

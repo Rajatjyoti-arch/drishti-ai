@@ -214,6 +214,16 @@ async fn send_response(
     resp: &IpcResponse,
 ) -> Result<(), std::io::Error> {
     let mut serialized = serde_json::to_string(resp).unwrap();
+    if serialized.len() > MAX_IPC_MESSAGE_BYTES {
+        let err_resp = IpcResponse::Error {
+            message: format!(
+                "IPC response exceeded maximum frame limit ({} bytes)",
+                MAX_IPC_MESSAGE_BYTES
+            ),
+            error_code: "RESPONSE_TOO_LARGE".to_string(),
+        };
+        serialized = serde_json::to_string(&err_resp).unwrap();
+    }
     serialized.push('\n');
     writer.write_all(serialized.as_bytes()).await?;
     writer.flush().await?;

@@ -33,6 +33,7 @@ class OutgoingTestRequest(BaseModel):
     target_invariant: InvariantType
     credential_ref: Optional[str] = None
     test_id: str = Field(default="test_default")
+    timeout_ms: int = Field(default=5000)
 
 class PolicyDecision(BaseModel):
     decision_id: str = Field(default_factory=lambda: f"dec_{uuid.uuid4().hex[:12]}")

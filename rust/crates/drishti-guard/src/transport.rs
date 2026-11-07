@@ -143,10 +143,21 @@ impl SafeHttpClient {
                 }
             }
 
-            let raw_bytes = resp
-                .bytes()
+            // Stream response bytes with maximum ceiling enforcement (prevents unbounded memory buffering)
+            const MAX_RESPONSE_BYTES: usize = 1024 * 1024; // 1 MB ceiling
+            let mut raw_bytes = Vec::new();
+            let mut stream_resp = resp;
+
+            while let Some(chunk) = stream_resp
+                .chunk()
                 .await
-                .map_err(|e| TransportError::Network(e.to_string()))?;
+                .map_err(|e| TransportError::Network(e.to_string()))?
+            {
+                if raw_bytes.len() + chunk.len() > MAX_RESPONSE_BYTES {
+                    return Err(TransportError::PayloadTooLarge(MAX_RESPONSE_BYTES));
+                }
+                raw_bytes.extend_from_slice(&chunk);
+            }
 
             // Compute SHA-256 hash of raw response frame
             let mut hasher = Sha256::new();
@@ -187,6 +198,10 @@ pub enum TransportError {
     InvalidRedirectHeader,
     #[error("Failed to parse redirect URL: {0}")]
     InvalidRedirectUrl(String),
+    #[error("Response payload exceeded maximum ceiling ({0} bytes)")]
+    PayloadTooLarge(usize),
+    #[error("Network request timed out after {0} ms")]
+    Timeout(u64),
 }
 
 #[cfg(test)]

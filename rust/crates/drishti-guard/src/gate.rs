@@ -109,10 +109,11 @@ impl PolicyGate {
             .await
             .map_err(GateError::AuditBeforeSendFailed)?;
 
-        // 6. Transmit HTTP Request via Controlled Safe Transport
-        let result = self
-            .http_client
-            .execute(
+        // 6. Transmit HTTP Request via Controlled Safe Transport with Authoritative Timeout Enforcement
+        let timeout_duration = std::time::Duration::from_millis(req.timeout_ms);
+        let result = tokio::time::timeout(
+            timeout_duration,
+            self.http_client.execute(
                 &req.request_id,
                 &req.method,
                 &req.target_url,
@@ -120,9 +121,11 @@ impl PolicyGate {
                 req.body.as_deref(),
                 resolved_auth_header.as_deref(),
                 &decision_nonce,
-            )
-            .await
-            .map_err(GateError::Transport)?;
+            ),
+        )
+        .await
+        .map_err(|_| GateError::Transport(TransportError::Timeout(req.timeout_ms)))?
+        .map_err(GateError::Transport)?;
 
         // 7. AUDIT-AFTER-RECEIVE
         let audit_result_payload = json!({

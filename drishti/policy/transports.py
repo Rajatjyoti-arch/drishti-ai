@@ -35,6 +35,11 @@ class RustGuardTransport(httpx.AsyncBaseTransport):
         except Exception:
             inv_type = InvariantType.TENANT_ISOLATION
 
+        # Extract timeout from request extensions if configured
+        timeout_ext = request.extensions.get("timeout", {})
+        timeout_read = timeout_ext.get("read") if isinstance(timeout_ext, dict) else None
+        timeout_ms = int(timeout_read * 1000) if timeout_read else 5000
+
         outgoing = OutgoingTestRequest(
             method=request.method,
             url=str(request.url),
@@ -44,6 +49,7 @@ class RustGuardTransport(httpx.AsyncBaseTransport):
             target_invariant=inv_type,
             credential_ref=cred_ref,
             test_id=test_id,
+            timeout_ms=timeout_ms,
         )
 
         try:
