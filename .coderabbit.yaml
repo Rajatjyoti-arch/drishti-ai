@@ -3,21 +3,46 @@ language: "en"
 reviews:
   path_filters:
     - "!target/**"
+    - "!rust/target/**"
     - "!**/fixtures/**"
+    - "!**/__pycache__/**"
+    - "!**/.venv/**"
+    - "!.agents/agents/**"
+    - "!.agents/gsd-core/**"
+    - "!.agents/hooks/**"
+    - "!.agents/scripts/**"
+    - "!.agents/skills/**"
+    - "!.agents/.gsd-staging/**"
   path_instructions:
-    - path: "**/safety/**"
+    - path: "rust/crates/drishti-guard/**"
       instructions: |
-        Flag any path that sends a request without allowlist, method/path, budget,
-        rate, concurrency, health and kill-switch checks, or without an audit entry.
-        Flag any logging of secrets or credentials.
-    - path: "**/agents/**"
+        Flag any network call without allowlist, method/path, budget, rate,
+        concurrency, health, and kill-switch checks, or without an audit entry.
+        Flag any logging or exposure of credentials or secrets.
+    - path: "drishti/policy/**"
       instructions: |
-        Agents must use the safety client for all network access and must never
-        mark a finding confirmed.
-    - path: "**/planner/**"
+        Ensure all policy gate checks, scope validation, rate limits, and
+        approval manager boundaries are strictly enforced. Flag secret leakage.
+    - path: "drishti/ipc/**"
       instructions: |
-        The planner may only return validated plans and must not send requests.
-    - path: "**/*.rs"
+        Ensure IPC communication to the Rust Guard daemon handles transport
+        errors fail-closed and preserves evidence integrity.
+    - path: "drishti/executors/**"
+      instructions: |
+        Executors must mediate all network interactions through drishti/policy/
+        and drishti/ipc/ (Rust Guard client). Executors must never mark a
+        finding confirmed (only the verifier may confirm).
+    - path: "drishti/discovery/**"
+      instructions: |
+        Discovery and attack planning may only output structured, validated
+        plans and must never execute raw network requests directly.
+    - path: "**/*.py"
+      instructions: |
+        No direct network calls outside drishti/policy/ and drishti/ipc/.
+        No shell=True, eval(), or exec(). No hardcoded secrets or credentials.
+        No bare except clauses. Require tests under tests/ for any new behavior.
+    - path: "rust/**"
       instructions: |
         Flag unwrap()/expect() in non-test code, unjustified unsafe, new
         dependencies without justification, and missing tests for new behaviour.
+        Only drishti-guard may open outbound HTTP connections via reqwest.
