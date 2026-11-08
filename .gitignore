@@ -68,3 +68,17 @@ __MACOSX/
 target/
 rust/target/
 **/*.rs.bk
+
+# GSD local install artifacts (installed per developer via @opengsd/gsd-core)
+.agents/agents/
+.agents/gsd-core/
+.agents/hooks/
+.agents/scripts/
+.agents/skills/
+.agents/.gsd-staging/
+.agents/.gsd-profile
+.agents/gsd-file-manifest.json
+.agents/gsd-install-state.json
+.agents/mcp_config.json
+.agents/settings.json
+.venv/
