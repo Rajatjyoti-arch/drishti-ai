@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en"
+reviews:
+  path_filters:
+    - "!target/**"
+    - "!**/fixtures/**"
+  path_instructions:
+    - path: "**/safety/**"
+      instructions: |
+        Flag any path that sends a request without allowlist, method/path, budget,
+        rate, concurrency, health and kill-switch checks, or without an audit entry.
+        Flag any logging of secrets or credentials.
+    - path: "**/agents/**"
+      instructions: |
+        Agents must use the safety client for all network access and must never
+        mark a finding confirmed.
+    - path: "**/planner/**"
+      instructions: |
+        The planner may only return validated plans and must not send requests.
+    - path: "**/*.rs"
+      instructions: |
+        Flag unwrap()/expect() in non-test code, unjustified unsafe, new
+        dependencies without justification, and missing tests for new behaviour.
